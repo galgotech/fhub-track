@@ -113,8 +113,8 @@ func (t *Track) trackObject(trackObject string) error {
 	trackDst := ""
 	paths := strings.Split(trackObject, ":")
 	if len(paths) == 1 {
-		trackSrc = trackObject
-		trackDst = trackObject
+		trackSrc = paths[0]
+		trackDst = paths[0]
 	} else if len(paths) == 2 {
 		trackSrc = paths[0]
 		trackDst = paths[1]
@@ -147,9 +147,10 @@ func (t *Track) trackObject(trackObject string) error {
 		return err
 	}
 
-	if !status.IsClean() {
-		fmt.Println(status.String())
-		return errors.New("Need status clean to track objects")
+	for _, status := range status {
+		if status.Staging == git.Added {
+			return errors.New("Unable to track files because they were added to the stage area")
+		}
 	}
 
 	files, err := vendorWorkTree.Filesystem.ReadDir(trackSrc)
