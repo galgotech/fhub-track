@@ -7,6 +7,7 @@ import (
 )
 
 type Setting struct {
+	RootPath    string
 	TrackFolder string
 }
 
@@ -14,6 +15,12 @@ func (s *Setting) Init(cmd *cmd.Cmd) error {
 	if _, err := os.Stat(s.TrackFolder); err != nil {
 		os.Mkdir(s.TrackFolder, 0775)
 	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	s.RootPath = dir
 
 	return nil
 }

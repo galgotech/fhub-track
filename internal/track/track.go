@@ -71,7 +71,6 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 		if line == "repo:" || line == "hash:" || line == "files:" {
 			return line[:len(line)-1], true
 		}
-
 		return "", false
 	}
 
@@ -110,6 +109,19 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 }
 
 func (t *Track) trackObject(trackObject string) error {
+	trackSrc := ""
+	trackDst := ""
+	paths := strings.Split(trackObject, ":")
+	if len(paths) == 1 {
+		trackSrc = trackObject
+		trackDst = trackObject
+	} else if len(paths) == 2 {
+		trackSrc = paths[0]
+		trackDst = paths[1]
+	} else {
+		return errors.New("Invalid track path")
+	}
+
 	vendorWorkTree, err := t.vendor.Worktree()
 	if err != nil {
 		return err
@@ -140,22 +152,23 @@ func (t *Track) trackObject(trackObject string) error {
 		return errors.New("Need status clean to track objects")
 	}
 
-	files, err := vendorWorkTree.Filesystem.ReadDir(trackObject)
+	files, err := vendorWorkTree.Filesystem.ReadDir(trackSrc)
 	if err != nil {
 		return err
 	}
 
 	filesPath := []string{}
 	for _, file := range files {
-		filePath := filepath.Join(trackObject, file.Name())
-		filesPath = append(filesPath, filePath)
+		filePathSrc := filepath.Join(trackSrc, file.Name())
+		filePathDst := filepath.Join(trackDst, file.Name())
+		filesPath = append(filesPath, filePathSrc)
 
-		fileRead, err := vendorWorkTree.Filesystem.Open(filePath)
+		fileRead, err := vendorWorkTree.Filesystem.Open(filePathSrc)
 		if err != nil {
 			return err
 		}
 
-		fileWrite, err := trackObjectWorkTree.Filesystem.Create(filePath)
+		fileWrite, err := trackObjectWorkTree.Filesystem.Create(filePathDst)
 		if err != nil {
 			return err
 		}
@@ -165,7 +178,7 @@ func (t *Track) trackObject(trackObject string) error {
 
 		bytes := make([]byte, 8)
 		for {
-			readLen, err := fileRead.Read(bytes)
+			_, err := fileRead.Read(bytes)
 			if err != nil {
 				if err == io.EOF {
 					break
@@ -173,9 +186,7 @@ func (t *Track) trackObject(trackObject string) error {
 				logTrack.Error("Fail error", "error", err.Error())
 				return err
 			}
-			if readLen == 0 {
-				break
-			}
+
 			_, err = fileWrite.Write(bytes)
 			if err != nil {
 				logTrack.Error("Fail error", "error", err)
@@ -183,7 +194,7 @@ func (t *Track) trackObject(trackObject string) error {
 			}
 		}
 
-		trackObjectWorkTree.Add(filePath)
+		trackObjectWorkTree.Add(filePathDst)
 	}
 
 	status, err = trackObjectWorkTree.Status()
@@ -284,13 +295,13 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	var err error
 	track := &Track{}
 
-	track.vendor, err = initRepository(cmd.WorkTreeSrc)
+	track.vendor, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeSrc))
 	if err != nil {
 		logTrack.Error("Fail start repository", "err", err, "repositoryPath", cmd.WorkTreeSrc)
 		return 1
 	}
 
-	track.trackObjects, err = initRepository(cmd.WorkTreeDst)
+	track.trackObjects, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeDst))
 	if err != nil {
 		logTrack.Error("Fail start repository", "err", err, "WorkTree", cmd.WorkTreeDst)
 		return 1
