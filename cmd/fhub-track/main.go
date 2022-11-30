@@ -14,7 +14,10 @@ func main() {
 		os.Exit(exit)
 	}
 
-	setting := setting.New()
+	setting, err := setting.New(cmd)
+	if err != nil {
+		os.Exit(1)
+	}
 
 	os.Exit(track.Run(cmd, setting))
 }

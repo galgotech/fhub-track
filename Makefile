@@ -1,5 +1,5 @@
 
-.PHONY: build
+.PHONY: build test test-track
 
 GO = go
 

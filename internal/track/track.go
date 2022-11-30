@@ -1,6 +1,7 @@
 package track
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 
 	"github.com/galgotech/fhub-track/internal/cmd"
@@ -31,7 +33,82 @@ func (l *logGitProgess) Write(s []byte) (int, error) {
 type Track struct {
 	vendor       *git.Repository
 	trackObjects *git.Repository
-	pathObjects  string
+}
+
+func (t *Track) status() error {
+	trackObjectWorkTree, err := t.trackObjects.Worktree()
+	if err != nil {
+		return err
+	}
+
+	status, err := trackObjectWorkTree.Status()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(status)
+
+	return nil
+}
+
+func (t *Track) trackUpdate() error {
+
+	err := t.searchTrackObjects()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (t *Track) searchTrackObjects() error {
+	trackLog, err := t.trackObjects.Log(&git.LogOptions{})
+	if err != nil {
+		return err
+	}
+
+	parseMessageKey := func(line string) (string, bool) {
+		if line == "repo:" || line == "hash:" || line == "files:" {
+			return line[:len(line)-1], true
+		}
+
+		return "", false
+	}
+
+	tracks := map[string][]string{}
+
+	err = trackLog.ForEach(func(commit *object.Commit) error {
+		lines := strings.Split(commit.Message, "\n")
+		if lines[0] == "fhub-track" {
+			var repos, files []string
+			var hash string
+
+			lastKey := ""
+			for _, line := range lines[1:] {
+				line = strings.TrimSpace(line)
+
+				if key, ok := parseMessageKey(line); ok {
+					lastKey = key
+				} else if lastKey == "repo" {
+					repos = append(repos, line)
+				} else if lastKey == "hash" {
+					hash = line
+				} else if lastKey == "files" {
+					files = append(files, line)
+				}
+			}
+
+			tracks[hash] = files
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(tracks)
+
+	return nil
 }
 
 func (t *Track) trackObject(trackObject string) error {
@@ -45,16 +122,46 @@ func (t *Track) trackObject(trackObject string) error {
 		return err
 	}
 
+	vendorConfig, err := t.vendor.Config()
+	if err != nil {
+		return err
+	}
+
 	trackObjectWorkTree, err := t.trackObjects.Worktree()
 	if err != nil {
 		return err
 	}
 
-	files, _ := vendorWorkTree.Filesystem.ReadDir(trackObject)
+	status, err := trackObjectWorkTree.Status()
+	if err != nil {
+		return err
+	}
+
+	if !status.IsClean() {
+		fmt.Println(status.String())
+		return errors.New("Need status clean to track objects")
+	}
+
+	files, err := vendorWorkTree.Filesystem.ReadDir(trackObject)
+	if err != nil {
+		return err
+	}
+
+	filesPath := []string{}
 	for _, file := range files {
 		filePath := filepath.Join(trackObject, file.Name())
-		fileRead, _ := vendorWorkTree.Filesystem.Open(filePath)
-		fileWrite, _ := trackObjectWorkTree.Filesystem.Create(filePath)
+		filesPath = append(filesPath, filePath)
+
+		fileRead, err := vendorWorkTree.Filesystem.Open(filePath)
+		if err != nil {
+			return err
+		}
+
+		fileWrite, err := trackObjectWorkTree.Filesystem.Create(filePath)
+		if err != nil {
+			return err
+		}
+
 		defer fileRead.Close()
 		defer fileWrite.Close()
 
@@ -81,23 +188,36 @@ func (t *Track) trackObject(trackObject string) error {
 		trackObjectWorkTree.Add(filePath)
 	}
 
-	status, _ := trackObjectWorkTree.Status()
+	status, err = trackObjectWorkTree.Status()
+	if err != nil {
+		return err
+	}
+
 	if !status.IsClean() {
-		fmt.Println(status.String())
-		msg := fmt.Sprintf("track-hash: %s", vendorHash.Hash().String())
-		_, err := trackObjectWorkTree.Commit(msg, &git.CommitOptions{All: true})
+		remotes := []string{}
+		for key, remote := range vendorConfig.Remotes {
+			remotes = append(remotes, fmt.Sprintf("%s:%s", key, strings.Join(remote.URLs, ",")))
+		}
+
+		msg := fmt.Sprintf("fhub-track\nrepo:\n  %s\nhash:\n  %s\nfiles:\n  %s", strings.Join(remotes, "\n  "), vendorHash.Hash().String(), strings.Join(filesPath, "\n  "))
+		commitHash, err := trackObjectWorkTree.Commit(msg, &git.CommitOptions{All: true})
 		if err != nil {
 			return err
 		}
-	}
 
-	trackLog, _ := t.trackObjects.Log(&git.LogOptions{})
-	c, _ := trackLog.Next()
-	fmt.Println(c)
-	// trackLog.ForEach(func(c *object.Commit) error {
-	// 	fmt.Println(c)
-	// 	return nil
-	// })
+		logTrack.Trace("Commit message", "message", msg, "hash", commitHash.String())
+
+		trackLog, err := t.trackObjects.Log(&git.LogOptions{})
+		if err != nil {
+			return err
+		}
+
+		commit, err := trackLog.Next()
+		if err != nil {
+			return err
+		}
+		fmt.Println(commit)
+	}
 
 	return nil
 }
@@ -122,11 +242,22 @@ func cloneRepository(repositoryURL, repositoryPath string) (*git.Repository, err
 	return r, nil
 }
 
-func initRepository(repositoryPath string) (*git.Repository, error) {
+func initRepository(workTree string) (*git.Repository, error) {
+	r, err := git.PlainOpen(workTree)
+	if err != nil {
+		if err == git.ErrRepositoryNotExists {
+			r, err = git.PlainInit(workTree, false)
+		}
+	}
+
+	return r, err
+}
+
+func initRepository2(repositoryPath, workTree string) (*git.Repository, error) {
 	var r *git.Repository
 	var err error
 
-	wt := osfs.New("tmp/project")
+	wt := osfs.New(repositoryPath)
 	dot := osfs.New(repositoryPath)
 	s := filesystem.NewStorage(dot, cache.NewObjectLRUDefault())
 
@@ -152,44 +283,56 @@ func initRepository(repositoryPath string) (*git.Repository, error) {
 }
 
 func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
-	track := &Track{
-		pathObjects: cmd.Folder,
-	}
-	logTrack.Debug("cmd", "cmd", cmd)
+	track := &Track{}
 
-	repositoryName, err := repositoryName(cmd.Repository)
+	repositoryName, err := repositoryName(setting.VendorRepository)
 	if err != nil {
-		logTrack.Error("Fail extract repository name", "err", err, "repository", cmd.Repository)
+		logTrack.Error("Fail extract repository name", "err", err, "repository", setting.VendorRepository)
 		return 1
 	}
 
 	logTrack.Debug("Repository name extracted", "repositoryName", repositoryName)
 
 	repositoryPath := filepath.Join(setting.TrackFolder, "vendor", repositoryName)
-	track.vendor, err = cloneRepository(cmd.Repository, repositoryPath)
+	track.vendor, err = cloneRepository(setting.VendorRepository, repositoryPath)
 	if err != nil {
 		logTrack.Error("Fail start repository", "err", err, "repositoryPath", repositoryPath)
 		return 1
 	}
 
-	repositoryPath = filepath.Join(setting.TrackFolder, "track-objects")
-	track.trackObjects, err = initRepository(repositoryPath)
+	track.trackObjects, err = initRepository(setting.WorkTree)
 	if err != nil {
-		logTrack.Error("Fail start repository", "err", err, "repositoryPath", repositoryPath)
+		logTrack.Error("Fail start repository", "err", err, "WorkTree", setting.WorkTree)
 		return 1
 	}
 
-	track.trackObjects.Head()
-
-	refVendor, err := track.vendor.Head()
-	if err != nil {
-		logTrack.Error("Fail get head from repository", "err", err)
-		return 1
+	if cmd.Init {
+		return 0
 	}
 
-	logTrack.Debug("Head hash", "refHash", refVendor.Hash().String(), "refName", refVendor.Name())
+	if cmd.Track != "" {
+		err := track.trackObject(cmd.Track)
+		if err != nil {
+			logTrack.Error("Track fail", "track", cmd.Track, "error", err.Error())
+			return 1
+		}
+	}
 
-	track.trackObject("public/app/core/components/NavBar")
+	if cmd.Status {
+		err := track.status()
+		if err != nil {
+			logTrack.Error("Status fail", "error", err.Error())
+			return 1
+		}
+	}
+
+	if cmd.TrackUpdate {
+		err := track.trackUpdate()
+		if err != nil {
+			logTrack.Error("Update track fail", "error", err.Error())
+			return 1
+		}
+	}
 
 	return 0
 }

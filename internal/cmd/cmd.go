@@ -10,24 +10,32 @@ var logCmd = log.New("cmd")
 
 type Cmd struct {
 	Repository string
-	Folder     string
+	WorkTree   string
+
+	Init        bool
+	Status      bool
+	Track       string
+	TrackUpdate bool
 }
 
 func New() (*Cmd, int) {
-	repository := flag.String("repository", "https://github.com/grafana/grafana.git", "repository")
-	folder := flag.String("folder", "tmp/project", "folder out")
+	cmd := &Cmd{}
+
+	flag.StringVar(&cmd.Repository, "repository", "", "repository to track")
+	flag.StringVar(&cmd.WorkTree, "work-tree", "", "Work tree path")
+
+	flag.BoolVar(&cmd.Init, "init", false, "Init")
+	flag.StringVar(&cmd.Track, "track", "", "Track objects")
+	flag.BoolVar(&cmd.Status, "status", false, "Status objects")
+	flag.BoolVar(&cmd.TrackUpdate, "track-update", false, "Update objects")
+
 	help := flag.Bool("help", false, "Help")
 
 	flag.Parse()
 
-	cmd := &Cmd{
-		Repository: *repository,
-		Folder:     *folder,
-	}
+	logCmd.Debug("Arguments", "cmd", cmd)
 
-	logCmd.Debug("Arguments", "repository", cmd.Repository, "folder", cmd.Folder)
-
-	if *repository == "" || *folder == "" {
+	if cmd.Repository == "" {
 		*help = true
 	}
 
