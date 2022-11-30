@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,19 +51,20 @@ func (t *Track) status() error {
 }
 
 func (t *Track) trackUpdate() error {
-
-	err := t.searchTrackObjects()
+	tracks, err := t.searchTrackObjects()
 	if err != nil {
 		return err
 	}
 
+	fmt.Println(tracks)
+
 	return nil
 }
 
-func (t *Track) searchTrackObjects() error {
+func (t *Track) searchTrackObjects() (map[string][]string, error) {
 	trackLog, err := t.trackObjects.Log(&git.LogOptions{})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	parseMessageKey := func(line string) (string, bool) {
@@ -103,12 +103,10 @@ func (t *Track) searchTrackObjects() error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	fmt.Println(tracks)
-
-	return nil
+	return tracks, nil
 }
 
 func (t *Track) trackObject(trackObject string) error {
@@ -283,26 +281,18 @@ func initRepository2(repositoryPath, workTree string) (*git.Repository, error) {
 }
 
 func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
+	var err error
 	track := &Track{}
 
-	repositoryName, err := repositoryName(setting.VendorRepository)
+	track.vendor, err = initRepository(cmd.WorkTreeSrc)
 	if err != nil {
-		logTrack.Error("Fail extract repository name", "err", err, "repository", setting.VendorRepository)
+		logTrack.Error("Fail start repository", "err", err, "repositoryPath", cmd.WorkTreeSrc)
 		return 1
 	}
 
-	logTrack.Debug("Repository name extracted", "repositoryName", repositoryName)
-
-	repositoryPath := filepath.Join(setting.TrackFolder, "vendor", repositoryName)
-	track.vendor, err = cloneRepository(setting.VendorRepository, repositoryPath)
+	track.trackObjects, err = initRepository(cmd.WorkTreeDst)
 	if err != nil {
-		logTrack.Error("Fail start repository", "err", err, "repositoryPath", repositoryPath)
-		return 1
-	}
-
-	track.trackObjects, err = initRepository(setting.WorkTree)
-	if err != nil {
-		logTrack.Error("Fail start repository", "err", err, "WorkTree", setting.WorkTree)
+		logTrack.Error("Fail start repository", "err", err, "WorkTree", cmd.WorkTreeDst)
 		return 1
 	}
 
@@ -335,14 +325,4 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	}
 
 	return 0
-}
-
-func repositoryName(repositoryURL string) (string, error) {
-	u, err := url.Parse(repositoryURL)
-	if err != nil {
-		return "", err
-	}
-	paths := strings.Split(u.Path, "/")
-
-	return paths[len(paths)-1], nil
 }

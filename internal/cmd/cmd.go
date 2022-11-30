@@ -9,8 +9,8 @@ import (
 var logCmd = log.New("cmd")
 
 type Cmd struct {
-	Repository string
-	WorkTree   string
+	WorkTreeSrc string
+	WorkTreeDst string
 
 	Init        bool
 	Status      bool
@@ -21,8 +21,8 @@ type Cmd struct {
 func New() (*Cmd, int) {
 	cmd := &Cmd{}
 
-	flag.StringVar(&cmd.Repository, "repository", "", "repository to track")
-	flag.StringVar(&cmd.WorkTree, "work-tree", "", "Work tree path")
+	flag.StringVar(&cmd.WorkTreeSrc, "work-tree-src", "", "Work tree src")
+	flag.StringVar(&cmd.WorkTreeDst, "work-tree-dst", "", "Work tree dst")
 
 	flag.BoolVar(&cmd.Init, "init", false, "Init")
 	flag.StringVar(&cmd.Track, "track", "", "Track objects")
@@ -35,7 +35,7 @@ func New() (*Cmd, int) {
 
 	logCmd.Debug("Arguments", "cmd", cmd)
 
-	if cmd.Repository == "" {
+	if cmd.WorkTreeSrc == "" {
 		*help = true
 	}
 
