@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +69,7 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 	}
 
 	parseMessageKey := func(line string) (string, bool) {
-		if line == "repo:" || line == "hash:" || line == "files:" {
+		if line == "repo:" || line == "hash:" || line == "files:" || line == "src:" || line == "dst:" {
 			return line[:len(line)-1], true
 		}
 		return "", false
@@ -80,7 +81,7 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 		lines := strings.Split(commit.Message, "\n")
 		if lines[0] == "fhub-track" {
 			var repos, files []string
-			var hash string
+			var hash, trackSrc, trackDst string
 
 			lastKey := ""
 			for _, line := range lines[1:] {
@@ -88,6 +89,10 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 
 				if key, ok := parseMessageKey(line); ok {
 					lastKey = key
+				} else if lastKey == "src" {
+					trackSrc = line
+				} else if lastKey == "dst" {
+					trackDst = line
 				} else if lastKey == "repo" {
 					repos = append(repos, line)
 				} else if lastKey == "hash" {
@@ -96,6 +101,8 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 					files = append(files, line)
 				}
 			}
+
+			fmt.Println(trackSrc, trackDst)
 
 			tracks[hash] = files
 		}
@@ -153,9 +160,21 @@ func (t *Track) trackObject(trackObject string) error {
 		}
 	}
 
-	files, err := vendorWorkTree.Filesystem.ReadDir(trackSrc)
+	trackSrcInfo, err := vendorWorkTree.Filesystem.Stat(trackSrc)
 	if err != nil {
 		return err
+	}
+
+	var files []fs.FileInfo
+	if trackSrcInfo.IsDir() {
+		files, err = vendorWorkTree.Filesystem.ReadDir(trackSrc)
+		if err != nil {
+			return err
+		}
+	} else {
+		trackSrc = filepath.Dir(trackSrc)
+		trackDst = filepath.Dir(trackDst)
+		files = append(files, trackSrcInfo)
 	}
 
 	filesPath := []string{}
@@ -209,7 +228,10 @@ func (t *Track) trackObject(trackObject string) error {
 			remotes = append(remotes, fmt.Sprintf("%s:%s", key, strings.Join(remote.URLs, ",")))
 		}
 
-		msg := fmt.Sprintf("fhub-track\nrepo:\n  %s\nhash:\n  %s\nfiles:\n  %s", strings.Join(remotes, "\n  "), vendorHash.Hash().String(), strings.Join(filesPath, "\n  "))
+		msg := fmt.Sprintf(
+			"fhub-track\nsrc: %s\ndst: %s\nrepo:\n  %s\nhash:\n  %s\nfiles:\n  %s",
+			trackSrc, trackDst, strings.Join(remotes, "\n  "), vendorHash.Hash().String(), strings.Join(filesPath, "\n  "),
+		)
 		commitHash, err := trackObjectWorkTree.Commit(msg, &git.CommitOptions{All: true})
 		if err != nil {
 			return err
