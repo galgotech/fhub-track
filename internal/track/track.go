@@ -134,7 +134,7 @@ func (t *Track) trackMultipeObject(trackMultipleObject string) error {
 	for key, status := range status {
 		if status.Staging == git.Added {
 			return errors.New("Unable to track files because they were added to the stage area")
-		} else if status.Staging == git.Modified {
+		} else if status.Worktree == git.Modified {
 			filesModified = append(filesModified, key)
 		}
 	}
@@ -150,6 +150,14 @@ func (t *Track) trackMultipeObject(trackMultipleObject string) error {
 
 		filesSrc = append(filesSrc, partialFilesSrc...)
 		filesDst = append(filesDst, partialFilesDst...)
+	}
+
+	for _, fileModified := range filesModified {
+		for _, fileDst := range filesDst {
+			if fileModified == fileDst {
+				return fmt.Errorf("File to track is modified %s", fileDst)
+			}
+		}
 	}
 
 	err = t.trackObject(filesSrc, filesDst)
