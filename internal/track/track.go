@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -31,8 +33,15 @@ func (l *logGitProgess) Write(s []byte) (int, error) {
 }
 
 type Track struct {
-	vendor       *git.Repository
-	trackObjects *git.Repository
+	vendor         *git.Repository
+	vendorWorkTree *git.Worktree
+	vendorHash     *plumbing.Reference
+	vendorConfig   *config.Config
+
+	trackObjects         *git.Repository
+	trackObjectsWorkTree *git.Worktree
+	trackObjectsHash     *plumbing.Reference
+	trackObjectsConfig   *config.Config
 }
 
 func (t *Track) status() error {
@@ -115,124 +124,55 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 	return tracks, nil
 }
 
-func (t *Track) trackObject(trackObject string) error {
-	trackSrc := ""
-	trackDst := ""
-	paths := strings.Split(trackObject, ":")
-	if len(paths) == 1 {
-		trackSrc = paths[0]
-		trackDst = paths[0]
-	} else if len(paths) == 2 {
-		trackSrc = paths[0]
-		trackDst = paths[1]
-	} else {
-		return errors.New("Invalid track path")
-	}
-
-	vendorWorkTree, err := t.vendor.Worktree()
+func (t *Track) trackMultipeObject(trackMultipleObject string) error {
+	status, err := t.trackObjectsWorkTree.Status()
 	if err != nil {
 		return err
 	}
 
-	vendorHash, err := t.vendor.Head()
-	if err != nil {
-		return err
-	}
-
-	vendorConfig, err := t.vendor.Config()
-	if err != nil {
-		return err
-	}
-
-	trackObjectWorkTree, err := t.trackObjects.Worktree()
-	if err != nil {
-		return err
-	}
-
-	status, err := trackObjectWorkTree.Status()
-	if err != nil {
-		return err
-	}
-
-	for _, status := range status {
+	filesModified := []string{}
+	for key, status := range status {
 		if status.Staging == git.Added {
 			return errors.New("Unable to track files because they were added to the stage area")
+		} else if status.Staging == git.Modified {
+			filesModified = append(filesModified, key)
 		}
 	}
 
-	trackSrcInfo, err := vendorWorkTree.Filesystem.Stat(trackSrc)
+	filesSrc := []string{}
+	filesDst := []string{}
+	trackObjects := strings.Split(trackMultipleObject, ",")
+	for _, trackObject := range trackObjects {
+		partialFilesSrc, partialFilesDst, err := t.searchVendorWorkTreeFiles(t.vendorWorkTree, trackObject)
+		if err != nil {
+			return err
+		}
+
+		filesSrc = append(filesSrc, partialFilesSrc...)
+		filesDst = append(filesDst, partialFilesDst...)
+	}
+
+	err = t.trackObject(filesSrc, filesDst)
 	if err != nil {
 		return err
 	}
 
-	var files []fs.FileInfo
-	if trackSrcInfo.IsDir() {
-		files, err = vendorWorkTree.Filesystem.ReadDir(trackSrc)
-		if err != nil {
-			return err
-		}
-	} else {
-		trackSrc = filepath.Dir(trackSrc)
-		trackDst = filepath.Dir(trackDst)
-		files = append(files, trackSrcInfo)
-	}
-
-	filesPath := []string{}
-	for _, file := range files {
-		filePathSrc := filepath.Join(trackSrc, file.Name())
-		filePathDst := filepath.Join(trackDst, file.Name())
-		filesPath = append(filesPath, filePathSrc)
-
-		fileRead, err := vendorWorkTree.Filesystem.Open(filePathSrc)
-		if err != nil {
-			return err
-		}
-
-		fileWrite, err := trackObjectWorkTree.Filesystem.Create(filePathDst)
-		if err != nil {
-			return err
-		}
-
-		defer fileRead.Close()
-		defer fileWrite.Close()
-
-		bytes := make([]byte, 8)
-		for {
-			_, err := fileRead.Read(bytes)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				logTrack.Error("Fail error", "error", err.Error())
-				return err
-			}
-
-			_, err = fileWrite.Write(bytes)
-			if err != nil {
-				logTrack.Error("Fail error", "error", err)
-				return err
-			}
-		}
-
-		trackObjectWorkTree.Add(filePathDst)
-	}
-
-	status, err = trackObjectWorkTree.Status()
+	status, err = t.trackObjectsWorkTree.Status()
 	if err != nil {
 		return err
 	}
 
 	if !status.IsClean() {
 		remotes := []string{}
-		for key, remote := range vendorConfig.Remotes {
+		for key, remote := range t.vendorConfig.Remotes {
 			remotes = append(remotes, fmt.Sprintf("%s:%s", key, strings.Join(remote.URLs, ",")))
 		}
 
 		msg := fmt.Sprintf(
-			"fhub-track\nsrc: %s\ndst: %s\nrepo:\n  %s\nhash:\n  %s\nfiles:\n  %s",
-			trackSrc, trackDst, strings.Join(remotes, "\n  "), vendorHash.Hash().String(), strings.Join(filesPath, "\n  "),
+			"fhub-track\nrepo:\n  %s\nhash:\n  %s\nfiles:\n  %s",
+			strings.Join(remotes, "\n  "), t.vendorHash.Hash().String(), strings.Join(filesSrc, "\n  "),
 		)
-		commitHash, err := trackObjectWorkTree.Commit(msg, &git.CommitOptions{All: true})
+		commitHash, err := t.trackObjectsWorkTree.Commit(msg, &git.CommitOptions{All: false})
 		if err != nil {
 			return err
 		}
@@ -249,6 +189,109 @@ func (t *Track) trackObject(trackObject string) error {
 			return err
 		}
 		fmt.Println(commit)
+	}
+
+	return nil
+}
+
+func (t *Track) searchVendorWorkTreeFiles(workTree *git.Worktree, trackObject string) ([]string, []string, error) {
+	trackSrc := ""
+	trackDst := ""
+	paths := strings.Split(trackObject, ":")
+	if len(paths) == 1 {
+		trackSrc = paths[0]
+		trackDst = paths[0]
+	} else if len(paths) == 2 {
+		trackSrc = paths[0]
+		trackDst = paths[1]
+	} else {
+		return nil, nil, errors.New("Invalid track path")
+	}
+
+	trackSrcInfo, err := workTree.Filesystem.Stat(trackSrc)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var files []fs.FileInfo
+	if trackSrcInfo.IsDir() {
+		files, err = workTree.Filesystem.ReadDir(trackSrc)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		trackSrc = filepath.Dir(trackSrc)
+		trackDst = filepath.Dir(trackDst)
+		files = append(files, trackSrcInfo)
+	}
+
+	filesSrc := []string{}
+	filesDst := []string{}
+	for _, file := range files {
+		filePathSrc := filepath.Join(trackSrc, file.Name())
+		filePathDst := filepath.Join(trackDst, file.Name())
+
+		trackSrcInfo, err := workTree.Filesystem.Stat(filePathSrc)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// Track recursively
+		if trackSrcInfo.IsDir() {
+			_, _, err := t.searchVendorWorkTreeFiles(workTree, fmt.Sprintf("%s:%s", filePathSrc, filePathDst))
+			if err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
+
+		filesSrc = append(filesSrc, filePathSrc)
+		filesDst = append(filesDst, filePathDst)
+	}
+
+	return filesSrc, filesDst, nil
+}
+
+func (t *Track) trackObject(trackSrc, trackDst []string) error {
+	for key, filePathSrc := range trackSrc {
+		filePathDst := trackDst[key]
+
+		fileRead, err := t.vendorWorkTree.Filesystem.Open(filePathSrc)
+		if err != nil {
+			return err
+		}
+
+		fileWrite, err := t.trackObjectsWorkTree.Filesystem.Create(filePathDst)
+		if err != nil {
+			return err
+		}
+
+		defer fileRead.Close()
+		defer fileWrite.Close()
+
+		for {
+			bytes := make([]byte, 8)
+			readLen, err := fileRead.Read(bytes)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				logTrack.Error("Fail error", "error", err.Error())
+				return err
+			}
+
+			if readLen == 0 {
+				break
+			}
+
+			_, err = fileWrite.Write(bytes[:readLen])
+			if err != nil {
+				logTrack.Error("Fail error", "error", err.Error())
+				return err
+			}
+		}
+
+		t.trackObjectsWorkTree.Add(filePathDst)
 	}
 
 	return nil
@@ -318,15 +361,47 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	var err error
 	track := &Track{}
 
+	// Vendor
 	track.vendor, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeSrc))
 	if err != nil {
 		logTrack.Error("Fail start repository", "err", err, "repositoryPath", cmd.WorkTreeSrc)
 		return 1
 	}
 
+	track.vendorWorkTree, err = track.vendor.Worktree()
+	if err != nil {
+		return 1
+	}
+
+	track.vendorHash, err = track.vendor.Head()
+	if err != nil {
+		return 1
+	}
+
+	track.vendorConfig, err = track.vendor.Config()
+	if err != nil {
+		return 1
+	}
+
+	// Track objects
 	track.trackObjects, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeDst))
 	if err != nil {
 		logTrack.Error("Fail start repository", "err", err, "WorkTree", cmd.WorkTreeDst)
+		return 1
+	}
+
+	track.trackObjectsWorkTree, err = track.trackObjects.Worktree()
+	if err != nil {
+		return 1
+	}
+
+	track.trackObjectsHash, err = track.trackObjects.Head()
+	if err != nil {
+		return 1
+	}
+
+	track.trackObjectsConfig, err = track.trackObjects.Config()
+	if err != nil {
 		return 1
 	}
 
@@ -335,7 +410,7 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	}
 
 	if cmd.Track != "" {
-		err := track.trackObject(cmd.Track)
+		err := track.trackMultipeObject(cmd.Track)
 		if err != nil {
 			logTrack.Error("Track fail", "track", cmd.Track, "error", err.Error())
 			return 1
