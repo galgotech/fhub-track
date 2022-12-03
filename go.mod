@@ -3,6 +3,7 @@ module github.com/galgotech/fhub-track
 go 1.19
 
 require (
+	github.com/galgotech/gotools v0.0.0-20221203193156-5565ffbc0879
 	github.com/go-git/go-git/v5 v5.4.2
 	github.com/rs/zerolog v1.28.0
 )

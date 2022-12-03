@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/galgotech/gotools/diff"
+
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -57,37 +59,103 @@ func (t *Track) status() error {
 	return nil
 }
 
+type hashObjectsTracked struct {
+	vendorHash   plumbing.Hash
+	trackHash    plumbing.Hash
+	objects      []string
+	objectRename string
+}
+
+type fileHash struct {
+	vendorHash plumbing.Hash
+	trackHash  plumbing.Hash
+}
+
+type objectName struct {
+	src string
+	dst string
+}
+
+type listObjectTracked = []*hashObjectsTracked
+
 func (t *Track) trackUpdate() error {
-	tracks, err := t.searchTrackObjects()
+	tracked, err := t.searchTrackHash()
 	if err != nil {
 		return err
 	}
 
-	fmt.Println(tracks)
+	objectsName := map[string]*objectName{}
+	objects := map[*objectName][]fileHash{}
+	for _, value := range tracked {
+		for _, o := range value.objects {
+			objectName := getObjectName(objectsName, o)
+			if _, ok := objects[objectName]; !ok {
+				objects[objectName] = []fileHash{}
+			}
+			objects[objectName] = append(objects[objectName], fileHash{
+				vendorHash: value.vendorHash,
+				trackHash:  value.trackHash,
+			})
+		}
+
+		if value.objectRename != "" {
+			rename := strings.Split(value.objectRename, ":")
+			objectName := getObjectName(objectsName, rename[0])
+			objectName.dst = rename[1]
+		}
+	}
+
+	for objectsName, hash := range objects {
+
+		c, _ := t.vendor.CommitObject(hash[0].vendorHash)
+		f, _ := c.File(objectsName.src)
+		vendorContent, _ := f.Contents()
+
+		c, _ = t.trackObjects.CommitObject(hash[0].trackHash)
+		f, _ = c.File(objectsName.dst)
+		trackContent, _ := f.Contents()
+
+		contentDiff := diff.Strings(vendorContent, trackContent)
+		if len(contentDiff) > 0 {
+			fmt.Println(contentDiff)
+			break
+		}
+	}
 
 	return nil
 }
 
-func (t *Track) searchTrackObjects() (map[string][]string, error) {
+func getObjectName(objectsName map[string]*objectName, name string) *objectName {
+	if _, ok := objectsName[name]; !ok {
+		objectsName[name] = &objectName{
+			src: name,
+			dst: name,
+		}
+	}
+
+	return objectsName[name]
+}
+
+func (t *Track) searchTrackHash() (listObjectTracked, error) {
 	trackLog, err := t.trackObjects.Log(&git.LogOptions{})
 	if err != nil {
 		return nil, err
 	}
 
 	parseMessageKey := func(line string) (string, bool) {
-		if line == "repo:" || line == "hash:" || line == "files:" || line == "src:" || line == "dst:" || line == "rename:" {
+		if line == "repo:" || line == "hash:" || line == "files:" || line == "rename:" {
 			return line[:len(line)-1], true
 		}
 		return "", false
 	}
 
-	tracks := map[string][]string{}
+	tracks := listObjectTracked{}
 
 	err = trackLog.ForEach(func(commit *object.Commit) error {
 		lines := strings.Split(commit.Message, "\n")
 		if lines[0] == "fhub-track" {
 			var repos, files []string
-			var hash, trackSrc, trackDst, rename string
+			var hash, rename string
 
 			lastKey := ""
 			for _, line := range lines[1:] {
@@ -95,10 +163,6 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 
 				if key, ok := parseMessageKey(line); ok {
 					lastKey = key
-				} else if lastKey == "src" {
-					trackSrc = line
-				} else if lastKey == "dst" {
-					trackDst = line
 				} else if lastKey == "repo" {
 					repos = append(repos, line)
 				} else if lastKey == "hash" {
@@ -110,9 +174,12 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 				}
 			}
 
-			fmt.Println(trackSrc, trackDst, rename)
-
-			tracks[hash] = files
+			tracks = append(tracks, &hashObjectsTracked{
+				vendorHash:   plumbing.NewHash(hash),
+				trackHash:    commit.Hash,
+				objects:      files,
+				objectRename: rename,
+			})
 		}
 		return nil
 	})
