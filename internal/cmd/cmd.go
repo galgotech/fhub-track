@@ -12,10 +12,12 @@ type Cmd struct {
 	WorkTreeSrc string
 	WorkTreeDst string
 
-	Init        bool
-	Status      bool
-	Track       string
-	TrackUpdate bool
+	Init                bool
+	Status              bool
+	Track               string
+	TrackRename         string
+	TrackIgnoreModified bool
+	TrackUpdate         bool
 }
 
 func New() (*Cmd, int) {
@@ -26,6 +28,8 @@ func New() (*Cmd, int) {
 
 	flag.BoolVar(&cmd.Init, "init", false, "Init")
 	flag.StringVar(&cmd.Track, "track", "", "Track objects")
+	flag.StringVar(&cmd.TrackRename, "track-rename", "", "Track rename object")
+	flag.BoolVar(&cmd.TrackIgnoreModified, "ignore-modified", false, "Track ignore modified files")
 	flag.BoolVar(&cmd.Status, "status", false, "Status objects")
 	flag.BoolVar(&cmd.TrackUpdate, "track-update", false, "Update objects")
 

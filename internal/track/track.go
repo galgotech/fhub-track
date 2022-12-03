@@ -9,13 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/storage/filesystem"
 
 	"github.com/galgotech/fhub-track/internal/cmd"
 	"github.com/galgotech/fhub-track/internal/log"
@@ -40,7 +38,6 @@ type Track struct {
 
 	trackObjects         *git.Repository
 	trackObjectsWorkTree *git.Worktree
-	trackObjectsHash     *plumbing.Reference
 	trackObjectsConfig   *config.Config
 }
 
@@ -78,7 +75,7 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 	}
 
 	parseMessageKey := func(line string) (string, bool) {
-		if line == "repo:" || line == "hash:" || line == "files:" || line == "src:" || line == "dst:" {
+		if line == "repo:" || line == "hash:" || line == "files:" || line == "src:" || line == "dst:" || line == "rename:" {
 			return line[:len(line)-1], true
 		}
 		return "", false
@@ -90,7 +87,7 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 		lines := strings.Split(commit.Message, "\n")
 		if lines[0] == "fhub-track" {
 			var repos, files []string
-			var hash, trackSrc, trackDst string
+			var hash, trackSrc, trackDst, rename string
 
 			lastKey := ""
 			for _, line := range lines[1:] {
@@ -108,10 +105,12 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 					hash = line
 				} else if lastKey == "files" {
 					files = append(files, line)
+				} else if lastKey == "rename" {
+					rename = line
 				}
 			}
 
-			fmt.Println(trackSrc, trackDst)
+			fmt.Println(trackSrc, trackDst, rename)
 
 			tracks[hash] = files
 		}
@@ -124,11 +123,29 @@ func (t *Track) searchTrackObjects() (map[string][]string, error) {
 	return tracks, nil
 }
 
-func (t *Track) trackMultipeObject(trackMultipleObject string) error {
+type ignoreFiles struct {
+	files map[string]bool
+}
+
+// Pattern defines a single gitignore pattern.
+func (i *ignoreFiles) Match(path []string, isDir bool) gitignore.MatchResult {
+	pathJoin := filepath.Join(path...)
+	if _, ok := i.files[pathJoin]; ok {
+		return gitignore.Include
+	}
+	return gitignore.Exclude
+}
+
+func (t *Track) trackMultipeObject(trackMultipleObject string, ignoreModified bool) error {
 	status, err := t.trackObjectsWorkTree.Status()
 	if err != nil {
 		return err
 	}
+
+	includes := &ignoreFiles{
+		files: map[string]bool{".": true},
+	}
+	t.trackObjectsWorkTree.Excludes = append(t.trackObjectsWorkTree.Excludes, includes)
 
 	filesModified := []string{}
 	for key, status := range status {
@@ -143,24 +160,47 @@ func (t *Track) trackMultipeObject(trackMultipleObject string) error {
 	filesDst := []string{}
 	trackObjects := strings.Split(trackMultipleObject, ",")
 	for _, trackObject := range trackObjects {
-		partialFilesSrc, partialFilesDst, err := t.searchVendorWorkTreeFiles(t.vendorWorkTree, trackObject)
+		trackSrc, trackDst, err := splitTrackObject(trackObject)
 		if err != nil {
 			return err
+		}
+
+		trackDstBase := trackDst
+		for trackDstBase != "." {
+			includes.files[trackDstBase] = true
+			trackDstBase = filepath.Dir(trackDstBase)
+		}
+
+		partialFilesSrc, partialFilesDst, err := t.searchVendorWorkTreeFiles(trackSrc, trackDst, includes)
+		if err != nil {
+			return err
+		}
+
+		if len(partialFilesSrc) != len(partialFilesDst) {
+			return errors.New("Differente number of files src and dst")
 		}
 
 		filesSrc = append(filesSrc, partialFilesSrc...)
 		filesDst = append(filesDst, partialFilesDst...)
 	}
 
-	for _, fileModified := range filesModified {
-		for _, fileDst := range filesDst {
-			if fileModified == fileDst {
+	for key, fileDst := range filesDst {
+		for _, fileModified := range filesModified {
+			if ignoreModified {
+				filesSrc = append(filesSrc[:key], filesSrc[key+1:]...)
+				filesDst = append(filesDst[:key], filesDst[key+1:]...)
+			} else if fileModified == fileDst {
 				return fmt.Errorf("File to track is modified %s", fileDst)
 			}
 		}
 	}
 
-	err = t.trackObject(filesSrc, filesDst)
+	err = t.copyObject(filesSrc, filesDst)
+	if err != nil {
+		return err
+	}
+
+	err = t.trackObjectsWorkTree.AddWithOptions(&git.AddOptions{All: true})
 	if err != nil {
 		return err
 	}
@@ -171,59 +211,25 @@ func (t *Track) trackMultipeObject(trackMultipleObject string) error {
 	}
 
 	if !status.IsClean() {
-		remotes := []string{}
-		for key, remote := range t.vendorConfig.Remotes {
-			remotes = append(remotes, fmt.Sprintf("%s:%s", key, strings.Join(remote.URLs, ",")))
-		}
-
-		msg := fmt.Sprintf(
-			"fhub-track\nrepo:\n  %s\nhash:\n  %s\nfiles:\n  %s",
-			strings.Join(remotes, "\n  "), t.vendorHash.Hash().String(), strings.Join(filesSrc, "\n  "),
-		)
-		commitHash, err := t.trackObjectsWorkTree.Commit(msg, &git.CommitOptions{All: false})
+		msg := fmt.Sprintf("files:\n  %s", strings.Join(filesSrc, "\n  "))
+		err := t.commit(msg)
 		if err != nil {
 			return err
 		}
-
-		logTrack.Trace("Commit message", "message", msg, "hash", commitHash.String())
-
-		trackLog, err := t.trackObjects.Log(&git.LogOptions{})
-		if err != nil {
-			return err
-		}
-
-		commit, err := trackLog.Next()
-		if err != nil {
-			return err
-		}
-		fmt.Println(commit)
 	}
 
 	return nil
 }
 
-func (t *Track) searchVendorWorkTreeFiles(workTree *git.Worktree, trackObject string) ([]string, []string, error) {
-	trackSrc := ""
-	trackDst := ""
-	paths := strings.Split(trackObject, ":")
-	if len(paths) == 1 {
-		trackSrc = paths[0]
-		trackDst = paths[0]
-	} else if len(paths) == 2 {
-		trackSrc = paths[0]
-		trackDst = paths[1]
-	} else {
-		return nil, nil, errors.New("Invalid track path")
-	}
-
-	trackSrcInfo, err := workTree.Filesystem.Stat(trackSrc)
+func (t *Track) searchVendorWorkTreeFiles(trackSrc, trackDst string, includes *ignoreFiles) ([]string, []string, error) {
+	trackSrcInfo, err := t.vendorWorkTree.Filesystem.Stat(trackSrc)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var files []fs.FileInfo
 	if trackSrcInfo.IsDir() {
-		files, err = workTree.Filesystem.ReadDir(trackSrc)
+		files, err = t.vendorWorkTree.Filesystem.ReadDir(trackSrc)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -239,70 +245,152 @@ func (t *Track) searchVendorWorkTreeFiles(workTree *git.Worktree, trackObject st
 		filePathSrc := filepath.Join(trackSrc, file.Name())
 		filePathDst := filepath.Join(trackDst, file.Name())
 
-		trackSrcInfo, err := workTree.Filesystem.Stat(filePathSrc)
+		trackSrcInfo, err := t.vendorWorkTree.Filesystem.Stat(filePathSrc)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		// Track recursively
 		if trackSrcInfo.IsDir() {
-			_, _, err := t.searchVendorWorkTreeFiles(workTree, fmt.Sprintf("%s:%s", filePathSrc, filePathDst))
+			includes.files[filePathDst] = true
+			filePathSrc, filePathDst, err := t.searchVendorWorkTreeFiles(filePathSrc, filePathDst, includes)
 			if err != nil {
 				return nil, nil, err
 			}
+
+			filesSrc = append(filesSrc, filePathSrc...)
+			filesDst = append(filesDst, filePathDst...)
 			continue
 		}
 
-		filesSrc = append(filesSrc, filePathSrc)
-		filesDst = append(filesDst, filePathDst)
+		_, err = t.trackObjectsWorkTree.Filesystem.Stat(filePathDst)
+		if err == nil {
+			logTrack.Warn("Object already is tracked", "path", filePathDst)
+		} else if errors.Is(err, fs.ErrNotExist) {
+			filesSrc = append(filesSrc, filePathSrc)
+			filesDst = append(filesDst, filePathDst)
+			includes.files[filePathDst] = true
+		} else {
+			return nil, nil, err
+		}
 	}
 
 	return filesSrc, filesDst, nil
 }
 
-func (t *Track) trackObject(trackSrc, trackDst []string) error {
+func (t *Track) copyObject(trackSrc, trackDst []string) error {
+	vendorFileSystem := t.vendorWorkTree.Filesystem
+	trackObjectsFileSystem := t.trackObjectsWorkTree.Filesystem
+
 	for key, filePathSrc := range trackSrc {
 		filePathDst := trackDst[key]
 
-		fileRead, err := t.vendorWorkTree.Filesystem.Open(filePathSrc)
+		fileRead, err := vendorFileSystem.Open(filePathSrc)
 		if err != nil {
 			return err
 		}
-
-		fileWrite, err := t.trackObjectsWorkTree.Filesystem.Create(filePathDst)
-		if err != nil {
-			return err
-		}
-
 		defer fileRead.Close()
+
+		fileWrite, err := trackObjectsFileSystem.Create(filePathDst)
+		if err != nil {
+			return err
+		}
 		defer fileWrite.Close()
 
-		for {
-			bytes := make([]byte, 8)
-			readLen, err := fileRead.Read(bytes)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				logTrack.Error("Fail error", "error", err.Error())
-				return err
-			}
-
-			if readLen == 0 {
-				break
-			}
-
-			_, err = fileWrite.Write(bytes[:readLen])
-			if err != nil {
-				logTrack.Error("Fail error", "error", err.Error())
-				return err
-			}
+		_, err = io.Copy(fileWrite, fileRead)
+		if err != nil {
+			return err
 		}
-
-		t.trackObjectsWorkTree.Add(filePathDst)
 	}
 
 	return nil
+}
+
+func (t *Track) trackRenameObject(trackRenameObject string) error {
+	trackSrc, trackDst, err := splitTrackObject(trackRenameObject)
+	if err != nil {
+		return err
+	}
+
+	status, err := t.trackObjectsWorkTree.Status()
+	if err != nil {
+		return err
+	}
+
+	for key, status := range status {
+		if status.Staging == git.Added {
+			return errors.New("Unable to track files because they were added to the stage area")
+		} else if status.Worktree == git.Modified && key == trackSrc {
+			return errors.New("Unable to rename track files because they were modified in worktree")
+		}
+	}
+
+	err = t.trackObjectsWorkTree.Filesystem.Rename(trackSrc, trackDst)
+	if err != nil {
+		return err
+	}
+
+	_, err = t.trackObjectsWorkTree.Add(trackDst)
+	if err != nil {
+		return err
+	}
+
+	msg := fmt.Sprintf("rename:\n  %s", trackRenameObject)
+	err = t.commit(msg)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (t *Track) commit(msg string) error {
+	remotes := []string{}
+	for key, remote := range t.vendorConfig.Remotes {
+		remotes = append(remotes, fmt.Sprintf("%s:%s", key, strings.Join(remote.URLs, ",")))
+	}
+
+	msg = fmt.Sprintf(
+		"fhub-track\nrepo:\n  %s\nhash:\n  %s\n%s",
+		strings.Join(remotes, "\n  "), t.vendorHash.Hash().String(), msg,
+	)
+
+	commitHash, err := t.trackObjectsWorkTree.Commit(msg, &git.CommitOptions{All: false})
+	if err != nil {
+		return err
+	}
+
+	logTrack.Debug("Commit message", "message", msg, "hash", commitHash.String())
+
+	trackLog, err := t.trackObjects.Log(&git.LogOptions{})
+	if err != nil {
+		return err
+	}
+
+	commit, err := trackLog.Next()
+	if err != nil {
+		return err
+	}
+	fmt.Println(commit)
+
+	return nil
+}
+
+func splitTrackObject(trackObject string) (string, string, error) {
+	trackSrc := ""
+	trackDst := ""
+	paths := strings.Split(trackObject, ":")
+	if len(paths) == 1 {
+		trackSrc = paths[0]
+		trackDst = paths[0]
+	} else if len(paths) == 2 {
+		trackSrc = paths[0]
+		trackDst = paths[1]
+	} else {
+		return "", "", errors.New("Invalid track path")
+	}
+
+	return trackSrc, trackDst, nil
 }
 
 func cloneRepository(repositoryURL, repositoryPath string) (*git.Repository, error) {
@@ -336,35 +424,6 @@ func initRepository(workTree string) (*git.Repository, error) {
 	return r, err
 }
 
-func initRepository2(repositoryPath, workTree string) (*git.Repository, error) {
-	var r *git.Repository
-	var err error
-
-	wt := osfs.New(repositoryPath)
-	dot := osfs.New(repositoryPath)
-	s := filesystem.NewStorage(dot, cache.NewObjectLRUDefault())
-
-	if _, err = dot.Stat(""); err != nil {
-		if os.IsNotExist(err) {
-			logTrack.Info("Git init", "repositoryPath", repositoryPath)
-			r, err = git.Init(s, wt)
-		} else {
-			logTrack.Error("Git osfs fail stat", "err", err.Error(), "repositoryPath", repositoryPath)
-			return nil, err
-		}
-	} else {
-		logTrack.Info("Git open", "repositoryPath", repositoryPath)
-		r, err = git.Open(s, wt)
-	}
-
-	if err != nil {
-		logTrack.Error("Git fail", "err", err.Error(), "repositoryPath", repositoryPath)
-		return nil, err
-	}
-
-	return r, nil
-}
-
 func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	var err error
 	track := &Track{}
@@ -372,22 +431,25 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	// Vendor
 	track.vendor, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeSrc))
 	if err != nil {
-		logTrack.Error("Fail start repository", "err", err, "repositoryPath", cmd.WorkTreeSrc)
+		logTrack.Error("Fail start repository", "err", err.Error(), "repositoryPath", cmd.WorkTreeSrc)
 		return 1
 	}
 
 	track.vendorWorkTree, err = track.vendor.Worktree()
 	if err != nil {
+		logTrack.Error("Fail get vendor repository worktree", "err", err.Error())
 		return 1
 	}
 
 	track.vendorHash, err = track.vendor.Head()
 	if err != nil {
+		logTrack.Error("Fail get vendor repository hash", "err", err.Error())
 		return 1
 	}
 
 	track.vendorConfig, err = track.vendor.Config()
 	if err != nil {
+		logTrack.Error("Fail get vendor repository config", "err", err.Error())
 		return 1
 	}
 
@@ -400,16 +462,13 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 
 	track.trackObjectsWorkTree, err = track.trackObjects.Worktree()
 	if err != nil {
-		return 1
-	}
-
-	track.trackObjectsHash, err = track.trackObjects.Head()
-	if err != nil {
+		logTrack.Error("Fail get track repository worktree", "err", err.Error())
 		return 1
 	}
 
 	track.trackObjectsConfig, err = track.trackObjects.Config()
 	if err != nil {
+		logTrack.Error("Fail get track repository track", "err", err.Error())
 		return 1
 	}
 
@@ -418,22 +477,24 @@ func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
 	}
 
 	if cmd.Track != "" {
-		err := track.trackMultipeObject(cmd.Track)
+		err := track.trackMultipeObject(cmd.Track, cmd.TrackIgnoreModified)
 		if err != nil {
 			logTrack.Error("Track fail", "track", cmd.Track, "error", err.Error())
 			return 1
 		}
-	}
-
-	if cmd.Status {
+	} else if cmd.TrackRename != "" {
+		err := track.trackRenameObject(cmd.TrackRename)
+		if err != nil {
+			logTrack.Error("Track rename fail", "track", cmd.TrackRename, "error", err.Error())
+			return 1
+		}
+	} else if cmd.Status {
 		err := track.status()
 		if err != nil {
 			logTrack.Error("Status fail", "error", err.Error())
 			return 1
 		}
-	}
-
-	if cmd.TrackUpdate {
+	} else if cmd.TrackUpdate {
 		err := track.trackUpdate()
 		if err != nil {
 			logTrack.Error("Update track fail", "error", err.Error())
