@@ -86,38 +86,47 @@ func (t *Track) trackUpdate() error {
 
 	objectsName := map[string]*objectName{}
 	objects := map[*objectName][]fileHash{}
-	for _, value := range tracked {
-		for _, o := range value.objects {
-			objectName := getObjectName(objectsName, o)
+	for _, track := range tracked {
+		for _, object := range track.objects {
+			objectName := getObjectName(objectsName, object)
 			if _, ok := objects[objectName]; !ok {
-				objects[objectName] = []fileHash{}
+				objects[objectName] = make([]fileHash, 0)
 			}
 			objects[objectName] = append(objects[objectName], fileHash{
-				vendorHash: value.vendorHash,
-				trackHash:  value.trackHash,
+				vendorHash: track.vendorHash,
+				trackHash:  track.trackHash,
 			})
 		}
 
-		if value.objectRename != "" {
-			rename := strings.Split(value.objectRename, ":")
+		if track.objectRename != "" {
+			rename := strings.Split(track.objectRename, ":")
 			objectName := getObjectName(objectsName, rename[0])
 			objectName.dst = rename[1]
 		}
 	}
 
-	for objectsName, hash := range objects {
+	for objectName, hash := range objects {
+		vendorContent, err := getCommitFileContent(t.vendor, hash[0].vendorHash, objectName.src)
+		if err != nil {
+			if errors.Is(err, object.ErrFileNotFound) {
+				// TODO: go-git random issue. Random not found some file
+				logTrack.Warn("File not found in commit", "repository", "vendor", "error", err.Error(), "vendorHash", hash[0].vendorHash.String(), "objectSrc", objectName.src)
+				continue
+			} else {
+				logTrack.Error("Read file contents", "repository", "vendor", "error", err.Error(), "vendorHash", hash[0].vendorHash.String(), "objectSrc", objectName.src)
+				return err
+			}
+		}
 
-		c, _ := t.vendor.CommitObject(hash[0].vendorHash)
-		f, _ := c.File(objectsName.src)
-		vendorContent, _ := f.Contents()
-
-		c, _ = t.trackObjects.CommitObject(hash[0].trackHash)
-		f, _ = c.File(objectsName.dst)
-		trackContent, _ := f.Contents()
+		trackContent, err := getCommitFileContent(t.trackObjects, hash[0].trackHash, objectName.dst)
+		if err != nil {
+			logTrack.Error("Read file contents", "repository", "track", "error", err.Error(), "trackObjectsHash", hash[0].trackHash.String(), "objectDst", objectName.dst)
+			return err
+		}
 
 		contentDiff := diff.Strings(vendorContent, trackContent)
 		if len(contentDiff) > 0 {
-			fmt.Println(contentDiff)
+			// fmt.Println(contentDiff)
 			break
 		}
 	}
@@ -134,6 +143,25 @@ func getObjectName(objectsName map[string]*objectName, name string) *objectName 
 	}
 
 	return objectsName[name]
+}
+
+func getCommitFileContent(repository *git.Repository, hash plumbing.Hash, path string) (string, error) {
+	c, err := repository.CommitObject(hash)
+	if err != nil {
+		return "", err
+	}
+
+	f, err := c.File(path)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := f.Contents()
+	if err != nil {
+		return "", err
+	}
+
+	return content, nil
 }
 
 func (t *Track) searchTrackHash() (listObjectTracked, error) {
