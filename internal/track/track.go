@@ -414,13 +414,18 @@ func (t *Track) trackRenameObject(trackRenameObject string) error {
 
 	for key, status := range status {
 		if status.Staging == git.Added {
-			return errors.New("Unable to track files because they were added to the stage area")
+			return errors.New("unable to track files because they were added to the stage area")
 		} else if status.Worktree == git.Modified && key == trackSrc {
-			return errors.New("Unable to rename track files because they were modified in worktree")
+			return errors.New("unable to rename track files because they were modified in worktree")
 		}
 	}
 
 	err = t.trackObjectsWorkTree.Filesystem.Rename(trackSrc, trackDst)
+	if err != nil {
+		return err
+	}
+
+	_, err = t.trackObjectsWorkTree.Remove(trackSrc)
 	if err != nil {
 		return err
 	}
@@ -482,7 +487,7 @@ func splitTrackObject(trackObject string) (string, string, error) {
 		trackSrc = paths[0]
 		trackDst = paths[1]
 	} else {
-		return "", "", errors.New("Invalid track path")
+		return "", "", errors.New("invalid track path")
 	}
 
 	return trackSrc, trackDst, nil

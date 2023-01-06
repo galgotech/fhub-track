@@ -45,7 +45,7 @@ func New() (*Cmd, int) {
 
 	if *help {
 		flag.PrintDefaults()
-		return nil, 1
+		return nil, 0
 	}
 
 	return cmd, 0
