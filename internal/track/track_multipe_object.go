@@ -12,95 +12,59 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
-type ignoreFiles struct {
-	files map[string]bool
+type excludeObjects struct {
+	include map[string]bool
 }
 
 // Pattern defines a single gitignore pattern.
-func (i *ignoreFiles) Match(path []string, isDir bool) gitignore.MatchResult {
+func (i *excludeObjects) Match(path []string, isDir bool) gitignore.MatchResult {
 	pathJoin := filepath.Join(path...)
-	if _, ok := i.files[pathJoin]; ok {
+	if _, ok := i.include[pathJoin]; ok {
 		return gitignore.Include
 	}
 	return gitignore.Exclude
 }
 
-func (t *Track) trackMultipeObject(trackMultipleObject string, ignoreModified bool) error {
-	status, err := t.trackObjectsWorkTree.Status()
+func (t *Track) trackMultipeObject(objects []string) error {
+	status, err := t.dstWorkTree.Status()
 	if err != nil {
 		return err
 	}
 
-	includes := &ignoreFiles{
-		files: map[string]bool{".": true},
-	}
-	t.trackObjectsWorkTree.Excludes = append(t.trackObjectsWorkTree.Excludes, includes)
-
-	filesModified := []string{}
-	for key, status := range status {
-		if status.Staging == git.Added {
-			return errors.New("Unable to track files because they were added to the stage area")
-		} else if status.Worktree == git.Modified {
-			filesModified = append(filesModified, key)
+	for _, status := range status {
+		if status.Staging != git.Unmodified {
+			return errors.New("the destination repository has files in the staging area")
 		}
 	}
 
-	filesSrc := []string{}
-	filesDst := []string{}
-	trackObjects := strings.Split(trackMultipleObject, ",")
-	for _, trackObject := range trackObjects {
-		trackSrc, trackDst, err := splitTrackObject(trackObject)
+	allObjects := []string{}
+	for _, object := range objects {
+		newObjects, err := t.searchObjectsInWorkTree(object)
 		if err != nil {
 			return err
 		}
-
-		trackDstBase := trackDst
-		for trackDstBase != "." {
-			includes.files[trackDstBase] = true
-			trackDstBase = filepath.Dir(trackDstBase)
-		}
-
-		partialFilesSrc, partialFilesDst, err := t.searchVendorWorkTreeFiles(trackSrc, trackDst, includes)
-		if err != nil {
-			return err
-		}
-
-		if len(partialFilesSrc) != len(partialFilesDst) {
-			return errors.New("Differente number of files src and dst")
-		}
-
-		filesSrc = append(filesSrc, partialFilesSrc...)
-		filesDst = append(filesDst, partialFilesDst...)
+		allObjects = append(allObjects, newObjects...)
 	}
 
-	for key, fileDst := range filesDst {
-		for _, fileModified := range filesModified {
-			if ignoreModified {
-				filesSrc = append(filesSrc[:key], filesSrc[key+1:]...)
-				filesDst = append(filesDst[:key], filesDst[key+1:]...)
-			} else if fileModified == fileDst {
-				return fmt.Errorf("File to track is modified %s", fileDst)
-			}
-		}
-	}
+	t.initExcludeFiles(allObjects, t.dstWorkTree)
 
-	err = t.copyObject(filesSrc, filesDst)
+	err = t.copyObject(objects, objects)
 	if err != nil {
 		return err
 	}
 
-	err = t.trackObjectsWorkTree.AddWithOptions(&git.AddOptions{All: true})
+	err = t.dstWorkTree.AddWithOptions(&git.AddOptions{All: true})
 	if err != nil {
 		return err
 	}
 
-	status, err = t.trackObjectsWorkTree.Status()
+	status, err = t.dstWorkTree.Status()
 	if err != nil {
 		return err
 	}
 
 	if !status.IsClean() {
-		msg := fmt.Sprintf("files:\n  %s", strings.Join(filesSrc, "\n  "))
+		msg := fmt.Sprintf("files:\n  %s", strings.Join(objects, "\n  "))
 		err := t.commit(msg)
 		if err != nil {
 			return err
@@ -110,15 +74,60 @@ func (t *Track) trackMultipeObject(trackMultipleObject string, ignoreModified bo
 	return nil
 }
 
-func (t *Track) searchVendorWorkTreeFiles(trackSrc, trackDst string, includes *ignoreFiles) ([]string, []string, error) {
-	trackSrcInfo, err := t.vendorWorkTree.Filesystem.Stat(trackSrc)
+func (t *Track) initExcludeFiles(objects []string, workTree *git.Worktree) {
+	excludeObjects := &excludeObjects{
+		include: map[string]bool{".": true},
+	}
+
+	for _, object := range objects {
+		excludeObjects.include[object] = true
+	}
+
+	workTree.Excludes = append(workTree.Excludes, excludeObjects)
+}
+
+func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
+	allObjects := []string{object}
+
+	objectInfo, err := t.srcWorkTree.Filesystem.Stat(object)
+	if err != nil {
+		return nil, err
+	}
+
+	if !objectInfo.IsDir() {
+		return allObjects, nil
+	}
+
+	subObjectsInfo, err := t.srcWorkTree.Filesystem.ReadDir(object)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, subObjectInfo := range subObjectsInfo {
+		// Walk folders recursively
+		if subObjectInfo.IsDir() {
+			object := filepath.Join(object, subObjectInfo.Name())
+			newObjects, err := t.searchObjectsInWorkTree(object)
+			if err != nil {
+				return nil, err
+			}
+
+			allObjects = append(allObjects, newObjects...)
+		}
+	}
+
+	return allObjects, nil
+}
+
+func (t *Track) searchSrcWorkTreeFiles(trackSrc, trackDst string, includes *excludeObjects) ([]string, []string, error) {
+	trackSrcInfo, err := t.srcWorkTree.Filesystem.Stat(trackSrc)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var files []fs.FileInfo
 	if trackSrcInfo.IsDir() {
-		files, err = t.vendorWorkTree.Filesystem.ReadDir(trackSrc)
+		files, err = t.srcWorkTree.Filesystem.ReadDir(trackSrc)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -134,15 +143,15 @@ func (t *Track) searchVendorWorkTreeFiles(trackSrc, trackDst string, includes *i
 		filePathSrc := filepath.Join(trackSrc, file.Name())
 		filePathDst := filepath.Join(trackDst, file.Name())
 
-		trackSrcInfo, err := t.vendorWorkTree.Filesystem.Stat(filePathSrc)
+		trackSrcInfo, err := t.srcWorkTree.Filesystem.Stat(filePathSrc)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		// Track recursively
+		// Walk folders recursively
 		if trackSrcInfo.IsDir() {
-			includes.files[filePathDst] = true
-			filePathSrc, filePathDst, err := t.searchVendorWorkTreeFiles(filePathSrc, filePathDst, includes)
+			includes.include[filePathDst] = true
+			filePathSrc, filePathDst, err := t.searchSrcWorkTreeFiles(filePathSrc, filePathDst, includes)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -152,13 +161,13 @@ func (t *Track) searchVendorWorkTreeFiles(trackSrc, trackDst string, includes *i
 			continue
 		}
 
-		_, err = t.trackObjectsWorkTree.Filesystem.Stat(filePathDst)
+		_, err = t.dstWorkTree.Filesystem.Stat(filePathDst)
 		if err == nil {
 			logTrack.Warn("Object already is tracked", "path", filePathDst)
 		} else if errors.Is(err, fs.ErrNotExist) {
 			filesSrc = append(filesSrc, filePathSrc)
 			filesDst = append(filesDst, filePathDst)
-			includes.files[filePathDst] = true
+			includes.include[filePathDst] = true
 		} else {
 			return nil, nil, err
 		}
@@ -167,12 +176,12 @@ func (t *Track) searchVendorWorkTreeFiles(trackSrc, trackDst string, includes *i
 	return filesSrc, filesDst, nil
 }
 
-func (t *Track) copyObject(trackSrc, trackDst []string) error {
-	vendorFileSystem := t.vendorWorkTree.Filesystem
-	trackObjectsFileSystem := t.trackObjectsWorkTree.Filesystem
+func (t *Track) copyObject(srcObject, dstObject []string) error {
+	vendorFileSystem := t.srcWorkTree.Filesystem
+	trackObjectsFileSystem := t.dstWorkTree.Filesystem
 
-	for key, filePathSrc := range trackSrc {
-		filePathDst := trackDst[key]
+	for key, filePathSrc := range srcObject {
+		filePathDst := dstObject[key]
 
 		fileRead, err := vendorFileSystem.Open(filePathSrc)
 		if err != nil {

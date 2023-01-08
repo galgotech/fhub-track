@@ -3,7 +3,7 @@ package track
 import "fmt"
 
 func (t *Track) status() error {
-	trackObjectWorkTree, err := t.trackObjects.Worktree()
+	trackObjectWorkTree, err := t.dstRepository.Worktree()
 	if err != nil {
 		return err
 	}

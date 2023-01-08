@@ -9,7 +9,6 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 
-	"github.com/galgotech/fhub-track/internal/cmd"
 	"github.com/galgotech/fhub-track/internal/log"
 	"github.com/galgotech/fhub-track/internal/setting"
 )
@@ -17,14 +16,13 @@ import (
 var logTrack = log.New("track")
 
 type Track struct {
-	vendor         *git.Repository
-	vendorWorkTree *git.Worktree
-	vendorHash     *plumbing.Reference
-	vendorConfig   *config.Config
+	srcRepository *git.Repository
+	srcConfig     *config.Config
+	srcWorkTree   *git.Worktree
+	srcHead       *plumbing.Reference
 
-	trackObjects         *git.Repository
-	trackObjectsWorkTree *git.Worktree
-	trackObjectsConfig   *config.Config
+	dstRepository *git.Repository
+	dstWorkTree   *git.Worktree
 }
 
 func splitTrackObject(trackObject string) (string, string, error) {
@@ -55,83 +53,107 @@ func initRepository(workTree string) (*git.Repository, error) {
 	return r, err
 }
 
-func Run(cmd *cmd.Cmd, setting *setting.Setting) int {
+func Object(setting *setting.Setting, objects []string) error {
+	track, err := initTrack(setting)
+	if err != nil {
+		return err
+	}
+
+	err = track.trackMultipeObject(objects)
+	if err != nil {
+		logTrack.Error("Track object fail", "object", setting.TrackObject, "error", err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func Rename(setting *setting.Setting, old string, new string) error {
+	track, err := initTrack(setting)
+	if err != nil {
+		return err
+	}
+
+	err = track.trackRenameObject(old, new)
+	if err != nil {
+		logTrack.Error("Track object fail", "object", setting.TrackObject, "error", err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func initTrack(setting *setting.Setting) (*Track, error) {
 	var err error
 	track := &Track{}
 
-	// Vendor
-	track.vendor, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeSrc))
+	// Source repository
+	track.srcRepository, err = initRepository(filepath.Join(setting.RootPath, setting.SrcRepo))
 	if err != nil {
-		logTrack.Error("Fail start repository", "err", err.Error(), "repositoryPath", cmd.WorkTreeSrc)
-		return 1
+		logTrack.Error("Fail start repository", "err", err.Error(), "repositoryPath", setting.SrcRepo)
+		return nil, err
 	}
 
-	track.vendorWorkTree, err = track.vendor.Worktree()
-	if err != nil {
-		logTrack.Error("Fail get vendor repository worktree", "err", err.Error())
-		return 1
-	}
-
-	track.vendorHash, err = track.vendor.Head()
-	if err != nil {
-		logTrack.Error("Fail get vendor repository hash", "err", err.Error())
-		return 1
-	}
-
-	track.vendorConfig, err = track.vendor.Config()
+	track.srcConfig, err = track.srcRepository.Config()
 	if err != nil {
 		logTrack.Error("Fail get vendor repository config", "err", err.Error())
-		return 1
+		return nil, err
 	}
 
-	// Track objects
-	track.trackObjects, err = initRepository(filepath.Join(setting.RootPath, cmd.WorkTreeDst))
+	track.srcWorkTree, err = track.srcRepository.Worktree()
 	if err != nil {
-		logTrack.Error("Fail start repository", "err", err, "WorkTree", cmd.WorkTreeDst)
-		return 1
+		logTrack.Error("Fail get vendor repository worktree", "err", err.Error())
+		return nil, err
 	}
 
-	track.trackObjectsWorkTree, err = track.trackObjects.Worktree()
+	track.srcHead, err = track.srcRepository.Head()
+	if err != nil {
+		logTrack.Error("Fail get vendor repository head", "err", err.Error())
+		return nil, err
+	}
+
+	// Destionation repository
+	track.dstRepository, err = initRepository(filepath.Join(setting.RootPath, setting.DstRepo))
+	if err != nil {
+		logTrack.Error("Fail start repository", "err", err, "WorkTree", setting.DstRepo)
+		return nil, err
+	}
+
+	track.dstWorkTree, err = track.dstRepository.Worktree()
 	if err != nil {
 		logTrack.Error("Fail get track repository worktree", "err", err.Error())
-		return 1
+		return nil, err
 	}
 
-	track.trackObjectsConfig, err = track.trackObjects.Config()
+	return track, nil
+}
+
+func Update(setting *setting.Setting) error {
+	track, err := initTrack(setting)
 	if err != nil {
-		logTrack.Error("Fail get track repository track", "err", err.Error())
-		return 1
+		return err
 	}
 
-	if cmd.Init {
-		return 0
+	err = track.trackUpdate()
+	if err != nil {
+		logTrack.Error("Track update fail", "error", err.Error())
+		return err
 	}
 
-	if cmd.Track != "" {
-		err := track.trackMultipeObject(cmd.Track, cmd.TrackIgnoreModified)
-		if err != nil {
-			logTrack.Error("Track fail", "track", cmd.Track, "error", err.Error())
-			return 1
-		}
-	} else if cmd.TrackRename != "" {
-		err := track.trackRenameObject(cmd.TrackRename)
-		if err != nil {
-			logTrack.Error("Track rename fail", "track", cmd.TrackRename, "error", err.Error())
-			return 1
-		}
-	} else if cmd.Status {
-		err := track.status()
-		if err != nil {
-			logTrack.Error("Status fail", "error", err.Error())
-			return 1
-		}
-	} else if cmd.TrackUpdate {
-		err := track.trackUpdate()
-		if err != nil {
-			logTrack.Error("Update track fail", "error", err.Error())
-			return 1
-		}
+	return nil
+}
+
+func Status(setting *setting.Setting) error {
+	track, err := initTrack(setting)
+	if err != nil {
+		return err
 	}
 
-	return 0
+	err = track.status()
+	if err != nil {
+		logTrack.Error("Status fail", "error", err.Error())
+		return err
+	}
+
+	return nil
 }

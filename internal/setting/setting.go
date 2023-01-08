@@ -2,20 +2,17 @@ package setting
 
 import (
 	"os"
-
-	"github.com/galgotech/fhub-track/internal/cmd"
 )
 
 type Setting struct {
-	RootPath    string
-	TrackFolder string
+	RootPath string
+	SrcRepo  string
+	DstRepo  string
+
+	TrackObject string
 }
 
-func (s *Setting) Init(cmd *cmd.Cmd) error {
-	if _, err := os.Stat(s.TrackFolder); err != nil {
-		os.Mkdir(s.TrackFolder, 0775)
-	}
-
+func (s *Setting) Init() error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -25,12 +22,10 @@ func (s *Setting) Init(cmd *cmd.Cmd) error {
 	return nil
 }
 
-func New(cmd *cmd.Cmd) (*Setting, error) {
-	setting := &Setting{
-		TrackFolder: ".fhub-track",
-	}
+func New() (*Setting, error) {
+	setting := &Setting{}
 
-	err := setting.Init(cmd)
+	err := setting.Init()
 	if err != nil {
 		return nil, err
 	}
