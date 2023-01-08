@@ -62,7 +62,11 @@ func (log *Log) Panic(msg string, args ...interface{}) {
 
 func (log *Log) iterateLog(loggerLevel *zerolog.Event, msg string, args []interface{}) {
 	for i := 0; i < len(args); i += 2 {
-		loggerLevel.Interface(args[i].(string), args[i+1])
+		if len(args) <= i+1 {
+			loggerLevel.Interface(args[i].(string), "<empty>")
+		} else {
+			loggerLevel.Interface(args[i].(string), args[i+1])
+		}
 	}
 	loggerLevel.Msg(msg)
 }
