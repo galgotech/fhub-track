@@ -8,8 +8,6 @@ type Setting struct {
 	RootPath string
 	SrcRepo  string
 	DstRepo  string
-
-	TrackObject string
 }
 
 func (s *Setting) Init() error {

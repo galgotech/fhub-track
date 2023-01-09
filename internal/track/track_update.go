@@ -2,67 +2,50 @@ package track
 
 import (
 	"errors"
+	"fmt"
 
-	"github.com/galgotech/gotools/diff"
+	"github.com/galgotech/fhub-track/tmp/tools-test/diff"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-type fileHash struct {
-	vendorHash plumbing.Hash
-	trackHash  plumbing.Hash
-}
-
-type objectName struct {
-	src string
-	dst string
-}
-
 func (t *Track) trackUpdate() error {
-	tracked, err := t.searchTrackedObjects()
+	trackedObjects, err := t.searchAllTrackedObjects()
 	if err != nil {
 		return err
 	}
 
-	objectsName := map[string]*objectName{}
-	objects := map[*objectName][]fileHash{}
-	for _, track := range tracked {
-		for _, object := range track.objects {
-			objectName := getObjectName(objectsName, object)
-			if _, ok := objects[objectName]; !ok {
-				objects[objectName] = make([]fileHash, 0)
-			}
-			objects[objectName] = append(objects[objectName], fileHash{
-				vendorHash: track.srcCommit,
-				trackHash:  track.dstCommit,
-			})
-		}
+	fmt.Println(trackedObjects)
 
-	}
-
-	for objectName, hash := range objects {
-		vendorContent, err := getCommitFileContent(t.srcRepository, hash[0].vendorHash, objectName.src)
+	for _, tracked := range trackedObjects {
+		srcContent, err := getCommitFileContent(t.srcRepository, tracked.srcCommit, tracked.srcObject)
 		if err != nil {
 			if errors.Is(err, object.ErrFileNotFound) {
 				// TODO: go-git random issue. Random not found some file
-				logTrack.Warn("File not found in commit", "repository", "vendor", "error", err.Error(), "vendorHash", hash[0].vendorHash.String(), "objectSrc", objectName.src)
+				logTrack.Warn("File not found in src repository commit", "error", err.Error(), "hash", tracked.srcCommit.String(), "object", tracked.srcObject)
 				continue
 			} else {
-				logTrack.Error("Read file contents", "repository", "vendor", "error", err.Error(), "vendorHash", hash[0].vendorHash.String(), "objectSrc", objectName.src)
+				logTrack.Error("Read file contents src repository", "error", err.Error(), "hash", tracked.srcCommit.String(), "object", tracked.srcObject)
 				return err
 			}
 		}
 
-		trackContent, err := getCommitFileContent(t.dstRepository, hash[0].trackHash, objectName.dst)
+		dstContent, err := getCommitFileContent(t.dstRepository, tracked.dstCommit, tracked.dstObject)
 		if err != nil {
-			logTrack.Error("Read file contents", "repository", "track", "error", err.Error(), "trackObjectsHash", hash[0].trackHash.String(), "objectDst", objectName.dst)
-			return err
+			if errors.Is(err, object.ErrFileNotFound) {
+				// TODO: go-git random issue. Random not found some file
+				logTrack.Warn("File not found in dst repository commit", "error", err.Error(), "hash", tracked.dstCommit.String(), "object", tracked.dstObject)
+				continue
+			} else {
+				logTrack.Error("Read file contents dst repository", "error", err.Error(), "hash", tracked.dstCommit.String(), "object", tracked.dstObject)
+				return err
+			}
 		}
 
-		contentDiff := diff.Strings(vendorContent, trackContent)
+		contentDiff := diff.Strings(srcContent, dstContent)
 		if len(contentDiff) > 0 {
-			// fmt.Println(contentDiff)
+			fmt.Println(contentDiff)
 			break
 		}
 	}
@@ -87,15 +70,4 @@ func getCommitFileContent(repository *git.Repository, hash plumbing.Hash, path s
 	}
 
 	return content, nil
-}
-
-func getObjectName(objectsName map[string]*objectName, name string) *objectName {
-	if _, ok := objectsName[name]; !ok {
-		objectsName[name] = &objectName{
-			src: name,
-			dst: name,
-		}
-	}
-
-	return objectsName[name]
 }

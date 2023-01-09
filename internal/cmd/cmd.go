@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"os"
-	"strings"
 
 	"github.com/galgotech/fhub-track/internal/log"
 	"github.com/galgotech/fhub-track/internal/setting"
@@ -61,18 +60,22 @@ func New(setting *setting.Setting) error {
 				Name:  "object",
 				Usage: "Track objects",
 				Action: func(c *cli.Context) error {
-					if c.NArg() > 0 {
-						objects := c.Args().Get(0)
-						return track.Object(setting, strings.Split(objects, ","))
+					var arg1, arg2 string
+					if c.NArg() == 1 {
+						arg1 = c.Args().Get(0)
+						arg2 = c.Args().Get(0)
+					} else if c.NArg() > 1 {
+						arg1 = c.Args().Get(0)
+						arg2 = c.Args().Get(1)
 					}
-					return nil
+					return track.Object(setting, arg1, arg2)
 				},
 			},
 			{
 				Name:  "rename",
 				Usage: "rename objects (folder ou file) <old_path> <new_path>",
 				Action: func(c *cli.Context) error {
-					if c.NArg() > 1 {
+					if c.NArg() == 2 {
 						old := c.Args().Get(0)
 						new := c.Args().Get(1)
 						return track.Rename(setting, old, new)
