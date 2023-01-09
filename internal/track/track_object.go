@@ -45,7 +45,7 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 		return err
 	}
 
-	allDstObjects := t.renameObjectsToDst(allSrcObjects, srcObject, dstObject)
+	allDstObjects := renameObjectsToDst(allSrcObjects, srcObject, dstObject)
 
 	t.initExcludeFiles(allDstObjects, t.dstWorkTree)
 
@@ -132,29 +132,6 @@ func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
 	return allObjects, nil
 }
 
-func (t *Track) renameObjectsToDst(objects []string, srcObject, dstObject string) []string {
-	dstObjects := make([]string, len(objects))
-	srcObject = filepath.Clean(srcObject)
-	dstObject = filepath.Clean(dstObject)
-	for i, object := range objects {
-		dstObjects[i] = filepath.Clean(strings.Replace(object, srcObject, dstObject, 1))
-	}
-	return dstObjects
-}
-
-func zipObjects(allSrcObjects, allDstObjects []string) ([]string, error) {
-	if len(allSrcObjects) != len(allDstObjects) {
-		return nil, errors.New("allSrcObjects and allDstObjects have different length")
-	}
-
-	zipObjects := make([]string, len(allSrcObjects))
-	for i := 0; i < len(allSrcObjects); i++ {
-		zipObjects[i] = fmt.Sprintf("%s:%s", allSrcObjects[i], allDstObjects[i])
-	}
-
-	return zipObjects, nil
-}
-
 func (t *Track) copyObject(allSrcObjects, allDstObjects []string) error {
 	if len(allSrcObjects) != len(allDstObjects) {
 		return errors.New("allSrcObjects and allDstObjects have different length")
@@ -185,4 +162,27 @@ func (t *Track) copyObject(allSrcObjects, allDstObjects []string) error {
 	}
 
 	return nil
+}
+
+func renameObjectsToDst(objects []string, srcObject, dstObject string) []string {
+	dstObjects := make([]string, len(objects))
+	srcObject = filepath.Clean(srcObject)
+	dstObject = filepath.Clean(dstObject)
+	for i, object := range objects {
+		dstObjects[i] = filepath.Clean(strings.Replace(object, srcObject, dstObject, 1))
+	}
+	return dstObjects
+}
+
+func zipObjects(allSrcObjects, allDstObjects []string) ([]string, error) {
+	if len(allSrcObjects) != len(allDstObjects) {
+		return nil, errors.New("allSrcObjects and allDstObjects have different length")
+	}
+
+	zipObjects := make([]string, len(allSrcObjects))
+	for i := 0; i < len(allSrcObjects); i++ {
+		zipObjects[i] = fmt.Sprintf("%s:%s", allSrcObjects[i], allDstObjects[i])
+	}
+
+	return zipObjects, nil
 }
