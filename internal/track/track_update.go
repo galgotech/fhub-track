@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/galgotech/fhub-track/tmp/tools-test/diff"
+	"github.com/galgotech/gotools/diff"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -15,8 +15,6 @@ func (t *Track) trackUpdate() error {
 	if err != nil {
 		return err
 	}
-
-	fmt.Println(trackedObjects)
 
 	for _, tracked := range trackedObjects {
 		srcContent, err := getCommitFileContent(t.srcRepository, tracked.srcCommit, tracked.srcObject)
