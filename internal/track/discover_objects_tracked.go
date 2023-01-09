@@ -29,12 +29,11 @@ func (t *Track) searchObjects(start *plumbing.Reference) (listObjectTracked, err
 	}
 
 	tracked := &listObjectTracked{}
-	trackedRenamed := map[string]string{}
+	trackedMoved := map[string]string{}
 
 	stackHash := []*object.Commit{commit}
 	for len(stackHash) > 0 {
-		fmt.Println(commit.Hash)
-		err = commitIter(tracked, trackedRenamed, commit)
+		err = commitIter(tracked, trackedMoved, commit)
 		if err != nil {
 			return nil, err
 		}
@@ -53,15 +52,13 @@ func (t *Track) searchObjects(start *plumbing.Reference) (listObjectTracked, err
 	return *tracked, nil
 }
 
-func commitIter(tracked *listObjectTracked, trackedRenamed map[string]string, commit *object.Commit) error {
+func commitIter(tracked *listObjectTracked, trackedMoved map[string]string, commit *object.Commit) error {
 	lines := strings.Split(commit.Message, "\n")
 	if lines[0] == "fhub-track" {
 		var repo string
-		var objects [][]string
 		var hash plumbing.Hash
 
 		lastKey := ""
-		objectKey := ""
 		for _, line := range lines[1:] {
 			line = strings.TrimSpace(line)
 
@@ -72,28 +69,13 @@ func commitIter(tracked *listObjectTracked, trackedRenamed map[string]string, co
 			} else if lastKey == "hash" {
 				hash = plumbing.NewHash(line)
 			} else if lastKey == "files" {
-				objectKey = "files"
-				objects = append(objects, strings.Split(line, ":"))
-			} else if lastKey == "move" {
-				objectKey = "move"
-				objects = [][]string{strings.Split(line, ":")}
-			}
-		}
+				objects := strings.Split(line, ":")
+				srcObject := objects[0]
+				dstObject := objects[1]
 
-		for _, object := range objects {
-			srcObject := object[0]
-			dstObject := object[1]
-			if objectKey == "move" {
-				if _, ok := (*tracked)[dstObject]; !ok {
-					if _, ok := trackedRenamed[dstObject]; !ok {
-						return fmt.Errorf("object already moved %s", dstObject)
-					}
-					trackedRenamed[dstObject] = srcObject
-				}
-			} else if objectKey == "files" {
-				if val, ok := trackedRenamed[dstObject]; ok {
+				if val, ok := trackedMoved[dstObject]; ok {
 					srcObject = val
-					delete(trackedRenamed, dstObject)
+					delete(trackedMoved, dstObject)
 				}
 				trackedObject := &hashObjectsTracked{
 					srcCommit: hash,
@@ -102,8 +84,20 @@ func commitIter(tracked *listObjectTracked, trackedRenamed map[string]string, co
 					dstObject: dstObject,
 					repos:     repo,
 				}
-				(*tracked)[object[1]] = trackedObject
+				(*tracked)[dstObject] = trackedObject
 				logTrack.Debug("tracked object", "object.srcObject", trackedObject.srcObject, "object.dstObject", trackedObject.dstObject)
+
+			} else if lastKey == "move" {
+				objects := strings.Split(line, ":")
+				srcObject := objects[0]
+				dstObject := objects[1]
+
+				if _, ok := (*tracked)[dstObject]; !ok {
+					if _, ok := trackedMoved[dstObject]; !ok {
+						return fmt.Errorf("object already moved %s", dstObject)
+					}
+					trackedMoved[dstObject] = srcObject
+				}
 			}
 		}
 	}
