@@ -14,7 +14,7 @@ func (t *Track) commit(msg string) error {
 	}
 
 	msg = fmt.Sprintf(
-		"fhub-track\nrepo:\n  %s\nhash:\n  %s\n%s",
+		"fhub-track\n\nrepo:\n  %s\nhash:\n  %s\n%s",
 		strings.Join(remotes, "\n  "), t.srcHead.Hash().String(), msg,
 	)
 

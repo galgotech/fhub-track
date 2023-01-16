@@ -90,6 +90,13 @@ func New(setting *setting.Setting) error {
 					return nil
 				},
 			},
+			{
+				Name:  "update",
+				Usage: "Update object",
+				Action: func(c *cli.Context) error {
+					return track.Update(setting)
+				},
+			},
 		},
 	}
 
