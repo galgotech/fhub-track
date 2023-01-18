@@ -5,7 +5,6 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/galgotech/fhub-track/internal/log"
 	"github.com/galgotech/fhub-track/internal/setting"
@@ -17,11 +16,9 @@ type Track struct {
 	srcRepository *git.Repository
 	srcConfig     *config.Config
 	srcWorkTree   *git.Worktree
-	srcHead       *plumbing.Reference
 
 	dstRepository *git.Repository
 	dstWorkTree   *git.Worktree
-	dstHead       *plumbing.Reference
 }
 
 func Object(setting *setting.Setting, srcObject, dstObject string) error {
@@ -107,12 +104,6 @@ func initTrack(setting *setting.Setting) (*Track, error) {
 		return nil, err
 	}
 
-	track.srcHead, err = track.srcRepository.Head()
-	if err != nil {
-		logTrack.Error("Fail get src repository head", "err", err.Error())
-		return nil, err
-	}
-
 	// Destionation repository
 	track.dstRepository, err = initRepository(filepath.Join(setting.RootPath, setting.DstRepo))
 	if err != nil {
@@ -123,12 +114,6 @@ func initTrack(setting *setting.Setting) (*Track, error) {
 	track.dstWorkTree, err = track.dstRepository.Worktree()
 	if err != nil {
 		logTrack.Error("Fail get dst repository worktree", "err", err.Error())
-		return nil, err
-	}
-
-	track.dstHead, err = track.dstRepository.Head()
-	if err != nil {
-		logTrack.Error("Fail get dst repository head", "err", err.Error())
 		return nil, err
 	}
 

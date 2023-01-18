@@ -1,163 +1,178 @@
 package track
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/diff"
-	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-type commitLink struct {
-	commit *object.Commit
-	next   *commitLink
-	prev   *commitLink
+type pathChunk struct {
+	hash      plumbing.Hash
+	filePatch diff.FilePatch
 }
 
-type pathPatch struct {
-	commit *object.Commit
-	patch  diff.Patch
+func (p pathChunk) Message() string {
+	return "commit:" + p.hash.String()
 }
 
-func (l *commitLink) ForEach(f func(*object.Commit, *object.Commit) error) {
-	start := l.prev
-	for start != nil {
-		f(start.next.commit, start.commit)
-		start = start.prev
-	}
+func (p pathChunk) FilePatches() []diff.FilePatch {
+	return []diff.FilePatch{p.filePatch}
 }
 
-type ChangeByPath struct {
-	head       *plumbing.Reference
-	repository *git.Repository
-	stop       plumbing.Hash
-	link       *commitLink
-	paths      map[string][]pathPatch
-}
-
-func (t *ChangeByPath) threeCommit(stop plumbing.Hash) error {
-	hash := t.head.Hash()
-	commit, err := t.repository.CommitObject(hash)
+func (p pathChunk) String() (string, error) {
+	buf := bytes.NewBuffer(nil)
+	ue := diff.NewUnifiedEncoder(buf, diff.DefaultContextLines)
+	err := ue.Encode(p)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	t.link = &commitLink{
-		commit: commit,
-	}
-
-	stackCommit := []plumbing.Hash{hash}
-	for stop != hash {
-		hash = stackCommit[0]
-		commit, err := t.repository.CommitObject(hash)
-		if err != nil {
-			return err
-		}
-
-		t.link.next = &commitLink{
-			commit: commit,
-			next:   nil,
-			prev:   t.link,
-		}
-		t.link = t.link.next
-
-		stackCommit = append(stackCommit[1:], commit.ParentHashes...)
-	}
-
-	return nil
+	return buf.String(), nil
 }
 
-func (t *ChangeByPath) findPathChange() {
-	t.link.ForEach(func(c1, c2 *object.Commit) error {
-		patch, err := c1.Patch(c2)
+var pathChangesSrc = make(map[string][]pathChunk, 0)
+var pathChangesDst = make(map[string][]pathChunk, 0)
+
+func searchChanges(repository *git.Repository, path string, start, stop plumbing.Hash) ([]pathChunk, error) {
+	changes := []pathChunk{}
+	hashStack := []plumbing.Hash{start}
+	for start != stop && len(hashStack) > 0 {
+		commit, err := repository.CommitObject(start)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		for _, f := range patch.FilePatches() {
-			from, to := f.Files()
-			if from != nil && to != nil {
-				t.addPathChange(from.Path(), c1, patch)
-			} else if from == nil && to != nil {
-				t.addPathChange(to.Path(), c1, patch)
-			} else if from != nil && to != nil {
-				if from.Path() == to.Path() {
-					t.addPathChange(from.Path(), c1, patch)
-				} else {
-					panic("rename not implemented")
+		parents := commit.ParentHashes
+		if len(parents) > 0 {
+			commitParent, err := repository.CommitObject(parents[0])
+			if err != nil {
+				return nil, err
+			}
+
+			patch, err := commitParent.Patch(commit)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, f := range patch.FilePatches() {
+				pathPatch := ""
+				moved := false
+				from, to := f.Files()
+				if from != nil && to != nil {
+					pathPatch = to.Path()
+					if from.Path() != to.Path() {
+						moved = true
+					}
+				} else if to != nil {
+					pathPatch = to.Path()
+				} else if from != nil {
+					pathPatch = from.Path()
+				}
+
+				if pathPatch == path {
+					if moved {
+						panic("trac changes from move file not implementend")
+					}
+					changes = append(changes, pathChunk{hash: start, filePatch: f})
 				}
 			}
 		}
 
-		for k := range t.paths {
-			fmt.Println(k)
-		}
-
-		return nil
-	})
-}
-
-func (t *ChangeByPath) addPathChange(path string, commit *object.Commit, patch diff.Patch) {
-	if _, ok := t.paths[path]; !ok {
-		t.paths[path] = []pathPatch{}
+		hashStack = append(hashStack[1:], parents...)
+		start = hashStack[0]
 	}
 
-	t.paths[path] = append(t.paths[path], pathPatch{
-		commit: commit,
-		patch:  patch,
-	})
+	return changes, nil
 }
 
 func (t *Track) trackUpdate() error {
-	trackedObjects, err := t.searchAllTrackedObjects()
+	srcHead, err := t.srcRepository.Head()
 	if err != nil {
 		return err
 	}
 
-	for path, detail := range trackedObjects {
-		fmt.Println(path)
-		for _, pair := range detail.pairing {
-			changeByPath := ChangeByPath{
-				head:       t.srcHead,
-				repository: t.srcRepository,
-				stop:       pair.src,
-				paths:      map[string][]pathPatch{},
-			}
+	dstHead, err := t.dstRepository.Head()
+	if err != nil {
+		return err
+	}
 
-			err := changeByPath.threeCommit(pair.src)
-			if err != nil {
-				return err
-			}
+	srcHeadHash := srcHead.Hash()
+	dstHeadHash := dstHead.Hash()
 
-			changeByPath.findPathChange()
+	trackObjects, err := t.searchAllTrackedObjects()
+	if err != nil {
+		return err
+	}
 
-			// linkSrc.ForEach(func(commit *object.Commit) {
-			// 	fmt.Println(commit.Hash.String())
-			// })
-
-			commitSrc, err := t.srcRepository.CommitObject(pair.src)
-			if err != nil {
-				return err
-			}
-
-			patch, err := commitSrc.Patch(changeByPath.link.prev.commit)
-			if err != nil {
-				return err
-			}
-			fmt.Println(patch.String())
-
-			os.Exit(0)
-
-			commitDst, err := t.dstRepository.CommitObject(pair.dst)
-			if err != nil {
-				return err
-			}
-
-			fmt.Println(commitSrc.Hash.String(), commitDst.Hash.String())
-
+	for path, trackObject := range trackObjects {
+		if path != "pkg/api/api.go" {
+			continue
 		}
+
+		logTrack.Debug("start update", "path", path)
+		if trackObject.commitSrc == srcHeadHash {
+			logTrack.Debug("path alredy update", "path", path)
+		}
+
+		if trackObject.commitSrc != srcHeadHash {
+			logTrack.Debug("start repository src", "commitSrc", trackObject.commitSrc.String(), "srcHeadHash", srcHeadHash.String())
+			changes, err := searchChanges(t.srcRepository, path, srcHeadHash, trackObject.commitSrc)
+			if err != nil {
+				return err
+			}
+			pathChangesSrc[path] = changes
+		}
+
+		if dstHeadHash != trackObject.commitDst {
+			logTrack.Debug("start repository dst", "commitDst", trackObject.commitDst.String(), "dstHeadHash", dstHeadHash.String())
+			changes, err := searchChanges(t.dstRepository, path, dstHeadHash, trackObject.commitDst)
+			if err != nil {
+				return err
+			}
+			pathChangesDst[path] = changes
+		}
+
+		if len(pathChangesSrc[path]) > 0 {
+			fmt.Println("------------- src")
+
+			ps := pathChangesSrc[path]
+			for i, j := 0, len(ps)-1; i < j; i, j = i+1, j-1 {
+				ps[i], ps[j] = ps[j], ps[i]
+			}
+
+			for _, p := range ps {
+				s, err := p.String()
+				if err != nil {
+					return err
+				}
+				fmt.Println(s)
+				break
+			}
+		}
+
+		if len(pathChangesDst[path]) > 0 {
+			fmt.Println("------------- dst")
+
+			ps := pathChangesDst[path]
+			for i, j := 0, len(ps)-1; i < j; i, j = i+1, j-1 {
+				ps[i], ps[j] = ps[j], ps[i]
+			}
+
+			for _, p := range ps {
+				s, err := p.String()
+				if err != nil {
+					return err
+				}
+				fmt.Println(s)
+				break
+			}
+		}
+
+		logTrack.Debug("changes find", "reposiotry", "pathChangesSrc", "len", len(pathChangesSrc[path]))
+		logTrack.Debug("changes find", "reposiotry", "pathChangesDst", "len", len(pathChangesDst[path]))
 
 		os.Exit(0)
 
@@ -197,11 +212,9 @@ func (t *Track) trackUpdate() error {
 		// }
 	}
 
-	fmt.Println(len(trackedObjects))
-
 	return nil
 
-	for _, tracked := range trackedObjects {
+	for _, tracked := range trackObjects {
 
 		fmt.Println(tracked)
 		fmt.Println("-----------")

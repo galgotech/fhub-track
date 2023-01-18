@@ -13,9 +13,14 @@ func (t *Track) commit(msg string) error {
 		remotes = append(remotes, fmt.Sprintf("%s:%s", key, strings.Join(remote.URLs, ",")))
 	}
 
+	head, err := t.srcRepository.Head()
+	if err != nil {
+		return err
+	}
+
 	msg = fmt.Sprintf(
 		"fhub-track\n\nrepo:\n  %s\nhash:\n  %s\n%s",
-		strings.Join(remotes, "\n  "), t.srcHead.Hash().String(), msg,
+		strings.Join(remotes, "\n  "), head.Hash().String(), msg,
 	)
 
 	commitHash, err := t.dstWorkTree.Commit(msg, &git.CommitOptions{All: false})

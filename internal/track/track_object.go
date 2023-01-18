@@ -40,10 +40,14 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 		}
 	}
 
+	fmt.Println(srcObject)
+
 	allSrcObjects, err := t.searchObjectsInWorkTree(srcObject)
 	if err != nil {
 		return err
 	}
+	fmt.Println(allSrcObjects)
+	fmt.Println("---")
 
 	allDstObjects := renameObjectsToDst(allSrcObjects, srcObject, dstObject)
 
@@ -106,7 +110,7 @@ func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
 	}
 
 	if !objectInfo.IsDir() {
-		return allObjects, nil
+		return []string{object}, nil
 	}
 
 	subObjectsInfo, err := t.srcWorkTree.Filesystem.ReadDir(object)
