@@ -38,6 +38,7 @@ func (t *Track) searchObjects(start *git.Oid) (mapObjectTrack, error) {
 	tracked := &mapObjectTrack{}
 	stackCommit := []*git.Commit{commit}
 	for len(stackCommit) > 0 {
+		commit := stackCommit[0]
 		parents := t.commitParents(commit)
 		err = t.commitIter(tracked, commit, parents)
 		if err != nil {
@@ -51,68 +52,53 @@ func (t *Track) searchObjects(start *git.Oid) (mapObjectTrack, error) {
 }
 
 func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents []*git.Commit) error {
+	commitTree, err := commit.Tree()
+	if err != nil {
+		return err
+	}
+
+	var commitParentTree *git.Tree
 	if len(parents) > 0 {
-		commitTree, err := commit.Tree()
+		commitParentTree, err = parents[0].Tree()
+		if err != nil {
+			return err
+		}
+	}
+
+	diffTree, err := t.dstRepository.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{
+		Flags: git.DiffNormal & git.DiffIgnoreWhitespace & git.DiffPatience,
+	})
+	if err != nil {
+		return err
+	}
+
+	err = diffTree.FindSimilar(&git.DiffFindOptions{
+		Flags: git.DiffFindRenames | git.DiffFindCopies | git.DiffFindForUntracked,
+	})
+	if err != nil {
+		return err
+	}
+
+	nDetals, err := diffTree.NumDeltas()
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < nDetals; i++ {
+		delta, err := diffTree.GetDelta(i)
 		if err != nil {
 			return err
 		}
 
-		commitParentTree, err := parents[0].Tree()
-		if err != nil {
-			return err
-		}
+		fmt.Println(delta.OldFile.Path)
+		fmt.Println(delta.Similarity, delta.Status)
 
-		diffTree, err := t.dstRepository.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{})
-		if err != nil {
-			return err
-		}
-
-		nDetals, err := diffTree.NumDeltas()
-		if err != nil {
-			return err
-		}
-		for i := 0; i < nDetals; i++ {
-			delta, err := diffTree.GetDelta(i)
-			if err != nil {
-				return err
+		path := delta.NewFile.Path
+		if _, ok := (*tracked)[path]; !ok {
+			(*tracked)[path] = &objectsTracked{
+				deleted: delta.Status == git.DeltaDeleted,
 			}
-
-			fmt.Println(delta.OldFile.Path)
-			fmt.Println(delta.NewFile.Path)
-
-			// action, err := f.Action()
-			// if err != nil {
-			// 	return err
-			// }
-
-			// path := ""
-			// if action == merkletrie.Insert || action == merkletrie.Modify {
-			// 	path = f.To.Name
-			// } else if action == merkletrie.Delete {
-			// 	path = f.From.Name
-			// }
-
-			// if _, ok := (*tracked)[path]; !ok {
-			// 	(*tracked)[path] = &objectsTracked{
-			// 		deleted: action == merkletrie.Delete,
-			// 	}
-			// }
 		}
-
-	} else {
-		// files, err := commit.Files()
-		// if err != nil {
-		// 	return err
-		// }
-
-		// files.ForEach(func(f *object.File) error {
-		// 	if _, ok := (*tracked)[f.Name]; !ok {
-		// 		(*tracked)[f.Name] = &objectsTracked{
-		// 			deleted: false,
-		// 		}
-		// 	}
-		// 	return nil
-		// })
 	}
 
 	lines := strings.Split(strings.TrimSpace(commit.Message()), "\n")
@@ -145,7 +131,7 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents 
 				}
 
 				if objectTracked, ok := (*tracked)[objects[1]]; ok {
-					if objectTracked.commitSrc.IsZero() {
+					if objectTracked.commitSrc == nil {
 						objectTracked.repo = repo
 						objectTracked.commitSrc = oid
 						objectTracked.commitDst = commit.Id()
