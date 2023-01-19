@@ -3,22 +3,16 @@ package track
 import (
 	"path/filepath"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-
 	"github.com/galgotech/fhub-track/internal/log"
 	"github.com/galgotech/fhub-track/internal/setting"
+	git "github.com/libgit2/git2go/v34"
 )
 
 var logTrack = log.New("track")
 
 type Track struct {
 	srcRepository *git.Repository
-	srcConfig     *config.Config
-	srcWorkTree   *git.Worktree
-
 	dstRepository *git.Repository
-	dstWorkTree   *git.Worktree
 }
 
 func Object(setting *setting.Setting, srcObject, dstObject string) error {
@@ -92,18 +86,6 @@ func initTrack(setting *setting.Setting) (*Track, error) {
 		return nil, err
 	}
 
-	track.srcConfig, err = track.srcRepository.Config()
-	if err != nil {
-		logTrack.Error("Fail get src repository config", "err", err.Error())
-		return nil, err
-	}
-
-	track.srcWorkTree, err = track.srcRepository.Worktree()
-	if err != nil {
-		logTrack.Error("Fail get src repository worktree", "err", err.Error())
-		return nil, err
-	}
-
 	// Destionation repository
 	track.dstRepository, err = initRepository(filepath.Join(setting.RootPath, setting.DstRepo))
 	if err != nil {
@@ -111,22 +93,14 @@ func initTrack(setting *setting.Setting) (*Track, error) {
 		return nil, err
 	}
 
-	track.dstWorkTree, err = track.dstRepository.Worktree()
-	if err != nil {
-		logTrack.Error("Fail get dst repository worktree", "err", err.Error())
-		return nil, err
-	}
-
 	return track, nil
 }
 
 func initRepository(workTree string) (*git.Repository, error) {
-	r, err := git.PlainOpen(workTree)
+	repo, err := git.OpenRepository(workTree)
 	if err != nil {
-		if err == git.ErrRepositoryNotExists {
-			r, err = git.PlainInit(workTree, false)
-		}
+		return nil, err
 	}
 
-	return r, err
+	return repo, err
 }

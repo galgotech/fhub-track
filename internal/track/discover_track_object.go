@@ -7,13 +7,12 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/diff"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/utils/merkletrie"
+	git "github.com/libgit2/git2go/v34"
 )
 
 type objectsTracked struct {
-	commitSrc plumbing.Hash
-	commitDst plumbing.Hash
+	commitSrc *git.Oid
+	commitDst *git.Oid
 	pathSrc   string
 	deleted   bool
 	repo      string
@@ -27,19 +26,19 @@ func (t *Track) searchAllTrackedObjects() (mapObjectTrack, error) {
 		return nil, err
 	}
 
-	return t.searchObjects(head.Hash())
+	return t.searchObjects(head.Target())
 }
 
-func (t *Track) searchObjects(start plumbing.Hash) (mapObjectTrack, error) {
-	tracked := &mapObjectTrack{}
-	stackCommit := []plumbing.Hash{start}
-	for len(stackCommit) > 0 {
-		commit, err := t.dstRepository.CommitObject(stackCommit[0])
-		if err != nil {
-			return nil, err
-		}
+func (t *Track) searchObjects(start *git.Oid) (mapObjectTrack, error) {
+	commit, err := t.dstRepository.LookupCommit(start)
+	if err != nil {
+		return nil, err
+	}
 
-		parents := commit.ParentHashes
+	tracked := &mapObjectTrack{}
+	stackCommit := []*git.Commit{commit}
+	for len(stackCommit) > 0 {
+		parents := t.commitParents(commit)
 		err = t.commitIter(tracked, commit, parents)
 		if err != nil {
 			return nil, err
@@ -51,72 +50,79 @@ func (t *Track) searchObjects(start plumbing.Hash) (mapObjectTrack, error) {
 	return *tracked, nil
 }
 
-func (t *Track) commitIter(tracked *mapObjectTrack, commit *object.Commit, parents []plumbing.Hash) error {
+func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents []*git.Commit) error {
 	if len(parents) > 0 {
-		commitTree, err := t.dstRepository.TreeObject(commit.TreeHash)
+		commitTree, err := commit.Tree()
 		if err != nil {
 			return err
 		}
 
-		commitParent, err := t.dstRepository.CommitObject(parents[0])
+		commitParentTree, err := parents[0].Tree()
 		if err != nil {
 			return err
 		}
 
-		commitParentTree, err := t.dstRepository.TreeObject(commitParent.TreeHash)
+		diffTree, err := t.dstRepository.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{})
 		if err != nil {
 			return err
 		}
 
-		diff, err := commitParentTree.Diff(commitTree)
+		nDetals, err := diffTree.NumDeltas()
 		if err != nil {
 			return err
 		}
-
-		for _, f := range diff {
-			action, err := f.Action()
+		for i := 0; i < nDetals; i++ {
+			delta, err := diffTree.GetDelta(i)
 			if err != nil {
 				return err
 			}
 
-			path := ""
-			if action == merkletrie.Insert || action == merkletrie.Modify {
-				path = f.To.Name
-			} else if action == merkletrie.Delete {
-				path = f.From.Name
-			}
+			fmt.Println(delta.OldFile.Path)
+			fmt.Println(delta.NewFile.Path)
 
-			if _, ok := (*tracked)[path]; !ok {
-				(*tracked)[path] = &objectsTracked{
-					deleted: action == merkletrie.Delete,
-				}
-			}
+			// action, err := f.Action()
+			// if err != nil {
+			// 	return err
+			// }
+
+			// path := ""
+			// if action == merkletrie.Insert || action == merkletrie.Modify {
+			// 	path = f.To.Name
+			// } else if action == merkletrie.Delete {
+			// 	path = f.From.Name
+			// }
+
+			// if _, ok := (*tracked)[path]; !ok {
+			// 	(*tracked)[path] = &objectsTracked{
+			// 		deleted: action == merkletrie.Delete,
+			// 	}
+			// }
 		}
 
 	} else {
-		files, err := commit.Files()
-		if err != nil {
-			return err
-		}
+		// files, err := commit.Files()
+		// if err != nil {
+		// 	return err
+		// }
 
-		files.ForEach(func(f *object.File) error {
-			if _, ok := (*tracked)[f.Name]; !ok {
-				(*tracked)[f.Name] = &objectsTracked{
-					deleted: false,
-				}
-			}
-			return nil
-		})
+		// files.ForEach(func(f *object.File) error {
+		// 	if _, ok := (*tracked)[f.Name]; !ok {
+		// 		(*tracked)[f.Name] = &objectsTracked{
+		// 			deleted: false,
+		// 		}
+		// 	}
+		// 	return nil
+		// })
 	}
 
-	lines := strings.Split(strings.TrimSpace(commit.Message), "\n")
+	lines := strings.Split(strings.TrimSpace(commit.Message()), "\n")
 	if len(lines) < 3 {
 		return nil
 	}
 
 	if lines[0] == "fhub-track" || lines[1] == "" {
 		var repo string
-		var hash plumbing.Hash
+		var oid *git.Oid
 
 		lastKey := ""
 		for _, line := range lines[2:] {
@@ -127,7 +133,11 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *object.Commit, paren
 			} else if lastKey == "repo" {
 				repo = line
 			} else if lastKey == "hash" {
-				hash = plumbing.NewHash(line)
+				var err error
+				oid, err = git.NewOid(line)
+				if err != nil {
+					return err
+				}
 			} else if lastKey == "files" {
 				objects := strings.Split(line, ":")
 				if len(objects) != 2 {
@@ -137,8 +147,8 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *object.Commit, paren
 				if objectTracked, ok := (*tracked)[objects[1]]; ok {
 					if objectTracked.commitSrc.IsZero() {
 						objectTracked.repo = repo
-						objectTracked.commitSrc = hash
-						objectTracked.commitDst = commit.Hash
+						objectTracked.commitSrc = oid
+						objectTracked.commitDst = commit.Id()
 						objectTracked.pathSrc = objects[0]
 					}
 				} else {

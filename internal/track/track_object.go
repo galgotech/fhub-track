@@ -4,78 +4,83 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
-
-type excludeObjects struct {
-	include map[string]bool
-}
-
-// Pattern defines a single gitignore pattern.
-func (i *excludeObjects) Match(path []string, isDir bool) gitignore.MatchResult {
-	pathJoin := filepath.Join(path...)
-	if _, ok := i.include[pathJoin]; ok {
-		return gitignore.Include
-	}
-	return gitignore.Exclude
-}
 
 func (t *Track) trackObject(srcObject, dstObject string) error {
 	logTrack.Info("start track object", "srcObject", srcObject, "dstObject", dstObject)
 
-	status, err := t.dstWorkTree.Status()
+	c, err := t.dstRepositoryStatusEntryCount()
 	if err != nil {
 		return err
 	}
-
-	for _, status := range status {
-		if status.Staging != git.Untracked {
-			return errors.New("the destination repository has files untracked")
-		} else if status.Staging != git.Unmodified {
-			return errors.New("the destination repository has files in the staging area")
-		}
+	if c > 0 {
+		return errors.New("the destination repository has files change")
 	}
-
-	fmt.Println(srcObject)
 
 	allSrcObjects, err := t.searchObjectsInWorkTree(srcObject)
 	if err != nil {
 		return err
 	}
-	fmt.Println(allSrcObjects)
-	fmt.Println("---")
 
 	allDstObjects := renameObjectsToDst(allSrcObjects, srcObject, dstObject)
-
-	t.initExcludeFiles(allDstObjects, t.dstWorkTree)
 
 	err = t.copyObject(allSrcObjects, allDstObjects)
 	if err != nil {
 		return err
 	}
 
-	err = t.dstWorkTree.AddWithOptions(&git.AddOptions{All: true})
+	index, err := t.dstRepository.Index()
 	if err != nil {
 		return err
 	}
 
-	status, err = t.dstWorkTree.Status()
+	for _, object := range allDstObjects {
+		err := index.AddByPath(object)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = index.Write()
 	if err != nil {
 		return err
 	}
 
-	if !status.IsClean() {
+	treeOid, err := index.WriteTree()
+	if err != nil {
+		return err
+	}
+
+	tree, err := t.dstRepository.LookupTree(treeOid)
+	if err != nil {
+		return err
+	}
+
+	c, err = t.dstRepositoryStatusEntryCount()
+	if err != nil {
+		return err
+	}
+	if c > 0 {
 		zipObjects, err := zipObjects(allSrcObjects, allDstObjects)
 		if err != nil {
 			return err
 		}
 
+		head, err := t.dstRepository.Head()
+		if err != nil {
+			return err
+		}
+
+		commit, err := t.dstRepository.LookupCommit(head.Target())
+		if err != nil {
+			return err
+		}
+
 		msg := fmt.Sprintf("files:\n  %s", strings.Join(zipObjects, "\n  "))
-		err = t.commit(msg)
+		err = t.commit(msg, tree, commit)
 		if err != nil {
 			return err
 		}
@@ -84,36 +89,35 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 	return nil
 }
 
-func (t *Track) initExcludeFiles(objects []string, workTree *git.Worktree) {
-	excludeObjects := &excludeObjects{
-		include: map[string]bool{".": true},
-	}
-
-	for _, object := range objects {
-		objectBase := object
-		for objectBase != "." {
-			excludeObjects.include[objectBase] = true
-			objectBase = filepath.Dir(objectBase)
-		}
-		excludeObjects.include[object] = true
-	}
-
-	workTree.Excludes = append(workTree.Excludes, excludeObjects)
-}
-
 func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
 	allObjects := []string{}
 
-	objectInfo, err := t.srcWorkTree.Filesystem.Stat(object)
+	// index, err := t.srcRepository.Index()
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// indexEntry, err := index.EntryByPath(object, 0)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	objectPath := filepath.Join(t.srcRepository.Workdir(), object)
+	file, err := os.Open(objectPath) // For read access.
 	if err != nil {
 		return nil, err
 	}
 
-	if !objectInfo.IsDir() {
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	if !fileInfo.IsDir() {
 		return []string{object}, nil
 	}
 
-	subObjectsInfo, err := t.srcWorkTree.Filesystem.ReadDir(object)
+	subObjectsInfo, err := os.ReadDir(objectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -141,19 +145,27 @@ func (t *Track) copyObject(allSrcObjects, allDstObjects []string) error {
 		return errors.New("allSrcObjects and allDstObjects have different length")
 	}
 
+	srcWorkdir := t.srcRepository.Workdir()
+	dstWorkdir := t.dstRepository.Workdir()
+
 	for i := 0; i < len(allSrcObjects); i++ {
-		srcObject := allSrcObjects[i]
-		dstObject := allDstObjects[i]
+		srcObject := filepath.Join(srcWorkdir, allSrcObjects[i])
+		dstObject := filepath.Join(dstWorkdir, allDstObjects[i])
 
 		logTrack.Debug("copy object", "src", srcObject, "dst", dstObject)
 
-		fileRead, err := t.srcWorkTree.Filesystem.Open(srcObject)
+		fileRead, err := os.OpenFile(srcObject, os.O_RDONLY, os.ModeAppend)
 		if err != nil {
 			return err
 		}
 		defer fileRead.Close()
 
-		fileWrite, err := t.dstWorkTree.Filesystem.Create(dstObject)
+		err = os.MkdirAll(filepath.Dir(dstObject), 0750)
+		if err != nil {
+			return err
+		}
+
+		fileWrite, err := os.OpenFile(dstObject, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 		if err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/go-git/go-git/v5 v5.4.2
+	github.com/libgit2/git2go/v34 v34.0.0
 	github.com/rs/zerolog v1.28.0
 	github.com/urfave/cli/v2 v2.23.7
 	golang.org/x/tools v0.5.0
