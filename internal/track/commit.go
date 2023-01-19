@@ -59,7 +59,7 @@ func (t *Track) commit(msg string, tree *git.Tree, parents ...*git.Commit) error
 	return nil
 }
 
-func (t *Track) commitParents(commit *git.Commit) []*git.Commit {
+func commitParents(commit *git.Commit) []*git.Commit {
 	parentCount := commit.ParentCount()
 	parents := make([]*git.Commit, parentCount)
 	for i := uint(0); i < parentCount; i++ {
@@ -68,7 +68,7 @@ func (t *Track) commitParents(commit *git.Commit) []*git.Commit {
 	return parents
 }
 
-func (t *Track) commitFiles(commit *git.Commit) ([]*git.TreeEntry, error) {
+func commitFiles(commit *git.Commit) ([]*git.TreeEntry, error) {
 	tree, err := commit.Tree()
 	if err != nil {
 		return nil, err

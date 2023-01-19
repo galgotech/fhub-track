@@ -39,7 +39,7 @@ func (t *Track) searchObjects(start *git.Oid) (mapObjectTrack, error) {
 	stackCommit := []*git.Commit{commit}
 	for len(stackCommit) > 0 {
 		commit := stackCommit[0]
-		parents := t.commitParents(commit)
+		parents := commitParents(commit)
 		err = t.commitIter(tracked, commit, parents)
 		if err != nil {
 			return nil, err
@@ -66,7 +66,7 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents 
 	}
 
 	diffTree, err := t.dstRepository.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{
-		Flags: git.DiffNormal & git.DiffIgnoreWhitespace & git.DiffPatience,
+		Flags: git.DiffNormal,
 	})
 	if err != nil {
 		return err
@@ -89,9 +89,6 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents 
 		if err != nil {
 			return err
 		}
-
-		fmt.Println(delta.OldFile.Path)
-		fmt.Println(delta.Similarity, delta.Status)
 
 		path := delta.NewFile.Path
 		if _, ok := (*tracked)[path]; !ok {
