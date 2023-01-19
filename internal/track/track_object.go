@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	git "github.com/libgit2/git2go/v34"
 )
 
 func (t *Track) trackObject(srcObject, dstObject string) error {
@@ -69,18 +71,18 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 			return err
 		}
 
+		var parents []*git.Commit
 		head, err := t.dstRepository.Head()
-		if err != nil {
-			return err
-		}
-
-		commit, err := t.dstRepository.LookupCommit(head.Target())
-		if err != nil {
-			return err
+		if err == nil {
+			commit, err := t.dstRepository.LookupCommit(head.Target())
+			if err != nil {
+				return err
+			}
+			parents = append(parents, commit)
 		}
 
 		msg := fmt.Sprintf("files:\n  %s", strings.Join(zipObjects, "\n  "))
-		err = t.commit(msg, tree, commit)
+		err = t.commit(msg, tree, parents...)
 		if err != nil {
 			return err
 		}
@@ -91,16 +93,6 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 
 func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
 	allObjects := []string{}
-
-	// index, err := t.srcRepository.Index()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// indexEntry, err := index.EntryByPath(object, 0)
-	// if err != nil {
-	// 	return nil, err
-	// }
 
 	objectPath := filepath.Join(t.srcRepository.Workdir(), object)
 	file, err := os.Open(objectPath) // For read access.
