@@ -36,7 +36,10 @@ func (t *Track) trackRenameObject(oldObject string, newObject string) error {
 		return err
 	}
 
-	msg := fmt.Sprintf("rename:\n  %s -> %s", oldObject, newObject)
+	err = index.Write()
+	if err != nil {
+		return err
+	}
 
 	treeOid, err := index.WriteTree()
 	if err != nil {
@@ -58,6 +61,7 @@ func (t *Track) trackRenameObject(oldObject string, newObject string) error {
 		return err
 	}
 
+	msg := fmt.Sprintf("rename:\n  %s -> %s", oldObject, newObject)
 	err = t.commit(msg, tree, commitHead)
 	if err != nil {
 		return err
