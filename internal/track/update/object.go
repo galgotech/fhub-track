@@ -1,16 +1,15 @@
-package track
+package update
 
 import (
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/format/diff"
+	"github.com/galgotech/fhub-track/internal/track/utils"
 	git "github.com/libgit2/git2go/v34"
 )
 
-type objectsTracked struct {
+type object struct {
 	commitSrc *git.Oid
 	commitDst *git.Oid
 	pathSrc   string
@@ -18,28 +17,24 @@ type objectsTracked struct {
 	repo      string
 }
 
-type mapObjectTrack = map[string]*objectsTracked
+type mapObject = map[string]*object
 
-func (t *Track) searchAllTrackedObjects() (mapObjectTrack, error) {
-	head, err := t.dstRepository.Head()
+func (t *Update) SearchObjects() (mapObject, error) {
+	head, err := t.dst.Head()
 	if err != nil {
 		return nil, err
 	}
 
-	return t.searchObjects(head.Target())
-}
-
-func (t *Track) searchObjects(start *git.Oid) (mapObjectTrack, error) {
-	commit, err := t.dstRepository.LookupCommit(start)
+	commit, err := t.dst.LookupCommit(head.Target())
 	if err != nil {
 		return nil, err
 	}
 
-	tracked := &mapObjectTrack{}
+	tracked := &mapObject{}
 	stackCommit := []*git.Commit{commit}
 	for len(stackCommit) > 0 {
 		commit := stackCommit[0]
-		parents := commitParents(commit)
+		parents := utils.CommitParents(commit)
 		err = t.commitIter(tracked, commit, parents)
 		if err != nil {
 			return nil, err
@@ -48,10 +43,16 @@ func (t *Track) searchObjects(start *git.Oid) (mapObjectTrack, error) {
 		stackCommit = append(stackCommit[1:], parents...)
 	}
 
+	for path, track := range *tracked {
+		if track.repo == "" {
+			delete(*tracked, path)
+		}
+	}
+
 	return *tracked, nil
 }
 
-func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents []*git.Commit) error {
+func (t *Update) commitIter(tracked *mapObject, commit *git.Commit, parents []*git.Commit) error {
 	commitTree, err := commit.Tree()
 	if err != nil {
 		return err
@@ -65,7 +66,7 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents 
 		}
 	}
 
-	diffTree, err := t.dstRepository.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{
+	diffTree, err := t.dst.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{
 		Flags: git.DiffNormal,
 	})
 	if err != nil {
@@ -92,7 +93,7 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents 
 
 		path := delta.NewFile.Path
 		if _, ok := (*tracked)[path]; !ok {
-			(*tracked)[path] = &objectsTracked{
+			(*tracked)[path] = &object{
 				deleted: delta.Status == git.DeltaDeleted,
 			}
 		}
@@ -143,6 +144,7 @@ func (t *Track) commitIter(tracked *mapObjectTrack, commit *git.Commit, parents 
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -151,60 +153,4 @@ func parseMessageKey(line string) (string, bool) {
 		return line[:len(line)-1], true
 	}
 	return "", false
-}
-
-func filePatchStatus(from, to diff.File) (string, string, error) {
-	path := ""
-	status := ""
-
-	if from == nil && to != nil {
-		status = "add"
-		path = to.Path()
-	} else if from != nil && to == nil {
-		status = "delete"
-		path = from.Path()
-	} else if from != nil && to != nil {
-		path = to.Path()
-		if from.Path() != to.Path() {
-			status = "rename"
-		} else {
-			status = "change"
-		}
-	} else {
-		return "", "", errors.New("fail get patches")
-	}
-
-	return path, status, nil
-}
-
-// func addTrack(tracked *mapObjectTracked, line, status, repo string, srcHash, dstHash plumbing.Hash) error {
-// 	objects := strings.Split(line, ":")
-// 	if len(objects) != 2 {
-// 		return fmt.Errorf("invalid %s line '%s'", status, line)
-// 	}
-
-// 	prepareObjectTracked(tracked, dstHash, objects[1], status)
-
-// 	(*tracked)[objects[0]].pairing = append((*tracked)[objects[0]].pairing, pairing{srcHash, dstHash})
-// 	// (*tracked)[objects[0]].repos = repo
-
-// 	return nil
-// }
-
-func prepareObjectTracked(tracked *mapObjectTrack, hash plumbing.Hash, path, status string) {
-	// objectTracked, ok := (*tracked)[path]
-	// if !ok {
-	// 	objectTracked = &objectsTracked{
-	// 		commits: map[plumbing.Hash][]string{},
-	// 		pairing: []pairing{},
-	// 	}
-	// }
-
-	// if _, ok := objectTracked.commits[hash]; !ok {
-	// 	objectTracked.commits[hash] = []string{}
-	// }
-
-	// objectTracked.commits[hash] = append(objectTracked.commits[hash], status)
-
-	// (*tracked)[path] = objectTracked
 }

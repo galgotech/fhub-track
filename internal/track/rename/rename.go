@@ -1,13 +1,24 @@
-package track
+package rename
 
 import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/galgotech/fhub-track/internal/track/utils"
+	git "github.com/libgit2/git2go/v34"
 )
 
-func (t *Track) trackRenameObject(oldObject string, newObject string) error {
-	c, err := t.dstRepositoryStatusEntryCount()
+func New(src, dst *git.Repository) *Rename {
+	return &Rename{src, dst}
+}
+
+type Rename struct {
+	src, dst *git.Repository
+}
+
+func (t *Rename) Run(oldObject string, newObject string) error {
+	c, err := utils.StatusEntryCount(t.dst)
 	if err != nil {
 		return err
 	}
@@ -21,7 +32,7 @@ func (t *Track) trackRenameObject(oldObject string, newObject string) error {
 		return err
 	}
 
-	index, err := t.dstRepository.Index()
+	index, err := t.dst.Index()
 	if err != nil {
 		return err
 	}
@@ -46,23 +57,23 @@ func (t *Track) trackRenameObject(oldObject string, newObject string) error {
 		return err
 	}
 
-	tree, err := t.dstRepository.LookupTree(treeOid)
+	tree, err := t.dst.LookupTree(treeOid)
 	if err != nil {
 		return err
 	}
 
-	head, err := t.dstRepository.Head()
+	head, err := t.dst.Head()
 	if err != nil {
 		return err
 	}
 
-	commitHead, err := t.dstRepository.LookupCommit(head.Target())
+	commitHead, err := t.dst.LookupCommit(head.Target())
 	if err != nil {
 		return err
 	}
 
 	msg := fmt.Sprintf("rename:\n  %s -> %s", oldObject, newObject)
-	err = t.commit(msg, tree, commitHead)
+	_, err = utils.Commit(t.dst, msg, tree, commitHead)
 	if err != nil {
 		return err
 	}

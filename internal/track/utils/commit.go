@@ -1,4 +1,4 @@
-package track
+package utils
 
 import (
 	"fmt"
@@ -7,25 +7,25 @@ import (
 	git "github.com/libgit2/git2go/v34"
 )
 
-func (t *Track) commit(msg string, tree *git.Tree, parents ...*git.Commit) error {
-	remotesName, err := t.srcRepository.Remotes.List()
+func Commit(repo *git.Repository, msg string, tree *git.Tree, parents ...*git.Commit) (*git.Oid, error) {
+	remotesName, err := repo.Remotes.List()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	remotes := []string{}
 	for _, remoteName := range remotesName {
-		remote, err := t.srcRepository.Remotes.Lookup(remoteName)
+		remote, err := repo.Remotes.Lookup(remoteName)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		remotes = append(remotes, fmt.Sprintf("%s:%s", remoteName, remote.Url()))
 	}
 
-	head, err := t.srcRepository.Head()
+	head, err := repo.Head()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	msg = fmt.Sprintf(
@@ -33,33 +33,20 @@ func (t *Track) commit(msg string, tree *git.Tree, parents ...*git.Commit) error
 		strings.Join(remotes, "\n  "), head.Target().String(), msg,
 	)
 
-	signature, err := t.dstRepository.DefaultSignature()
+	signature, err := repo.DefaultSignature()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	oid, err := t.dstRepository.CreateCommit("HEAD", signature, signature, msg, tree, parents...)
+	oid, err := repo.CreateCommit("HEAD", signature, signature, msg, tree, parents...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	logTrack.Debug("Commit message", "message", msg, "hash", oid.String())
-
-	// trackLog, err := t.dstRepository.Log(&git.LogOptions{})
-	// if err != nil {
-	// 	return err
-	// }
-
-	// commit, err := trackLog.Next()
-	// if err != nil {
-	// 	return err
-	// }
-	// fmt.Println(commit)
-
-	return nil
+	return oid, nil
 }
 
-func commitParents(commit *git.Commit) []*git.Commit {
+func CommitParents(commit *git.Commit) []*git.Commit {
 	parentCount := commit.ParentCount()
 	parents := make([]*git.Commit, parentCount)
 	for i := uint(0); i < parentCount; i++ {
@@ -68,7 +55,7 @@ func commitParents(commit *git.Commit) []*git.Commit {
 	return parents
 }
 
-func commitFiles(commit *git.Commit) ([]*git.TreeEntry, error) {
+func CommitFiles(commit *git.Commit) ([]*git.TreeEntry, error) {
 	tree, err := commit.Tree()
 	if err != nil {
 		return nil, err

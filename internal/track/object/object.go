@@ -1,4 +1,4 @@
-package track
+package object
 
 import (
 	"errors"
@@ -8,13 +8,25 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/galgotech/fhub-track/internal/log"
+	"github.com/galgotech/fhub-track/internal/track/utils"
 	git "github.com/libgit2/git2go/v34"
 )
 
-func (t *Track) trackObject(srcObject, dstObject string) error {
+type Object struct {
+	src, dst *git.Repository
+}
+
+func New(src, dst *git.Repository) *Object {
+	return &Object{src, dst}
+}
+
+var logTrack = log.New("track-object")
+
+func (t *Object) Run(srcObject, dstObject string) error {
 	logTrack.Info("start track object", "srcObject", srcObject, "dstObject", dstObject)
 
-	c, err := t.dstRepositoryStatusEntryCount()
+	c, err := utils.StatusEntryCount(t.dst)
 	if err != nil {
 		return err
 	}
@@ -34,7 +46,7 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 		return err
 	}
 
-	index, err := t.dstRepository.Index()
+	index, err := t.dst.Index()
 	if err != nil {
 		return err
 	}
@@ -56,12 +68,12 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 		return err
 	}
 
-	tree, err := t.dstRepository.LookupTree(treeOid)
+	tree, err := t.dst.LookupTree(treeOid)
 	if err != nil {
 		return err
 	}
 
-	c, err = t.dstRepositoryStatusEntryCount()
+	c, err = utils.StatusEntryCount(t.dst)
 	if err != nil {
 		return err
 	}
@@ -72,9 +84,9 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 		}
 
 		var parents []*git.Commit
-		head, err := t.dstRepository.Head()
+		head, err := t.dst.Head()
 		if err == nil {
-			commit, err := t.dstRepository.LookupCommit(head.Target())
+			commit, err := t.dst.LookupCommit(head.Target())
 			if err != nil {
 				return err
 			}
@@ -82,7 +94,7 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 		}
 
 		msg := fmt.Sprintf("files:\n  %s", strings.Join(zipObjects, "\n  "))
-		err = t.commit(msg, tree, parents...)
+		_, err = utils.Commit(t.dst, msg, tree, parents...)
 		if err != nil {
 			return err
 		}
@@ -91,10 +103,10 @@ func (t *Track) trackObject(srcObject, dstObject string) error {
 	return nil
 }
 
-func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
+func (t *Object) searchObjectsInWorkTree(object string) ([]string, error) {
 	allObjects := []string{}
 
-	objectPath := filepath.Join(t.srcRepository.Workdir(), object)
+	objectPath := filepath.Join(t.src.Workdir(), object)
 	file, err := os.Open(objectPath) // For read access.
 	if err != nil {
 		return nil, err
@@ -132,13 +144,13 @@ func (t *Track) searchObjectsInWorkTree(object string) ([]string, error) {
 	return allObjects, nil
 }
 
-func (t *Track) copyObject(allSrcObjects, allDstObjects []string) error {
+func (t *Object) copyObject(allSrcObjects, allDstObjects []string) error {
 	if len(allSrcObjects) != len(allDstObjects) {
 		return errors.New("allSrcObjects and allDstObjects have different length")
 	}
 
-	srcWorkdir := t.srcRepository.Workdir()
-	dstWorkdir := t.dstRepository.Workdir()
+	srcWorkdir := t.src.Workdir()
+	dstWorkdir := t.dst.Workdir()
 
 	for i := 0; i < len(allSrcObjects); i++ {
 		srcObject := filepath.Join(srcWorkdir, allSrcObjects[i])

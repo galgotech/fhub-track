@@ -3,25 +3,31 @@ package track
 import (
 	"path/filepath"
 
+	git "github.com/libgit2/git2go/v34"
+
 	"github.com/galgotech/fhub-track/internal/log"
 	"github.com/galgotech/fhub-track/internal/setting"
-	git "github.com/libgit2/git2go/v34"
+	"github.com/galgotech/fhub-track/internal/track/object"
+	"github.com/galgotech/fhub-track/internal/track/rename"
+	"github.com/galgotech/fhub-track/internal/track/status"
+	"github.com/galgotech/fhub-track/internal/track/update"
 )
 
 var logTrack = log.New("track")
 
 type Track struct {
-	srcRepository *git.Repository
-	dstRepository *git.Repository
+	src *git.Repository
+	dst *git.Repository
 }
 
 func Object(setting *setting.Setting, srcObject, dstObject string) error {
-	track, err := initTrack(setting)
+	src, dst, err := initRepos(setting)
 	if err != nil {
 		return err
 	}
 
-	err = track.trackObject(srcObject, dstObject)
+	o := object.New(src, dst)
+	err = o.Run(srcObject, dstObject)
 	if err != nil {
 		logTrack.Error("Track object fail", "object", srcObject, "error", err.Error())
 		return err
@@ -31,12 +37,13 @@ func Object(setting *setting.Setting, srcObject, dstObject string) error {
 }
 
 func Rename(setting *setting.Setting, old string, new string) error {
-	track, err := initTrack(setting)
+	src, dst, err := initRepos(setting)
 	if err != nil {
 		return err
 	}
 
-	err = track.trackRenameObject(old, new)
+	r := rename.New(src, dst)
+	err = r.Run(old, new)
 	if err != nil {
 		logTrack.Error("Rename object fail", "old", old, "new", new, "error", err.Error())
 		return err
@@ -46,14 +53,16 @@ func Rename(setting *setting.Setting, old string, new string) error {
 }
 
 func Update(setting *setting.Setting) error {
-	track, err := initTrack(setting)
+	src, dst, err := initRepos(setting)
 	if err != nil {
 		return err
 	}
 
-	err = track.trackUpdate()
+	u := update.New(src, dst)
+
+	err = u.Run()
 	if err != nil {
-		logTrack.Error("Track update fail", "error", err.Error())
+		logTrack.Error("Update fail", "error", err.Error())
 		return err
 	}
 
@@ -61,12 +70,13 @@ func Update(setting *setting.Setting) error {
 }
 
 func Status(setting *setting.Setting) error {
-	track, err := initTrack(setting)
+	src, dst, err := initRepos(setting)
 	if err != nil {
 		return err
 	}
 
-	err = track.status()
+	s := status.New(src, dst)
+	err = s.Run()
 	if err != nil {
 		logTrack.Error("Status fail", "error", err.Error())
 		return err
@@ -75,32 +85,20 @@ func Status(setting *setting.Setting) error {
 	return nil
 }
 
-func initTrack(setting *setting.Setting) (*Track, error) {
-	var err error
-	track := &Track{}
-
+func initRepos(setting *setting.Setting) (*git.Repository, *git.Repository, error) {
 	// Source repository
-	track.srcRepository, err = initRepository(filepath.Join(setting.RootPath, setting.SrcRepo))
+	src, err := git.OpenRepository(filepath.Join(setting.RootPath, setting.SrcRepo))
 	if err != nil {
 		logTrack.Error("Fail start src repository", "err", err.Error(), "repositoryPath", setting.SrcRepo)
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Destionation repository
-	track.dstRepository, err = initRepository(filepath.Join(setting.RootPath, setting.DstRepo))
+	dst, err := git.OpenRepository(filepath.Join(setting.RootPath, setting.DstRepo))
 	if err != nil {
 		logTrack.Error("Fail start dst repository", "err", err, "WorkTree", setting.DstRepo)
-		return nil, err
+		return nil, nil, err
 	}
 
-	return track, nil
-}
-
-func initRepository(workTree string) (*git.Repository, error) {
-	repo, err := git.OpenRepository(workTree)
-	if err != nil {
-		return nil, err
-	}
-
-	return repo, err
+	return src, dst, nil
 }

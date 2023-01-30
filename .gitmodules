@@ -1,0 +1,4 @@
+[submodule "git2go"]
+	path = git2go
+	url = git@github.com:galgotech/git2go.git
+	branch = functions
