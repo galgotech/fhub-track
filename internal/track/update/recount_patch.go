@@ -1,15 +1,169 @@
 package update
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
 	git "github.com/libgit2/git2go/v34"
 )
 
-func recountPatch(ancestorBuffer []byte, patch *git.Patch) (string, error) {
+type hunkMatch struct {
+	baseLine []int
+	origin   git.DiffLineType
+	line     int
+	content  string
+}
+
+// Naive implementation need optimization
+func recountPatch(base string, patch *git.Patch) (string, error) {
+	newPatch, err := rewritePatchHeader(patch)
+	if err != nil {
+		return "", err
+	}
+
+	numHunks, err := patch.NumHunks()
+	if err != nil {
+		return "", err
+	}
+	for i := 0; i < numHunks; i++ {
+		diffHunk, numHunkLines, err := patch.Hunk(i)
+		if err != nil {
+			return "", err
+		}
+
+		baseLines := strings.SplitAfter(base, "\n")
+		M := len(baseLines)
+
+		// Search string match
+		hunkMatch := make([]hunkMatch, numHunkLines)
+		for j := 0; j < numHunkLines; j++ {
+			diffLine, err := patch.HunkLine(i, j)
+			if err != nil {
+				return "", err
+			}
+			hunkMatch[j].origin = diffLine.Origin
+			hunkMatch[j].line = j
+			hunkMatch[j].content = diffLine.Content
+
+			if diffLine.Origin == git.DiffLineContext || diffLine.Origin == git.DiffLineDeletion {
+				for m := 0; m < M; m++ {
+					if baseLines[m] == diffLine.Content {
+						hunkMatch[j].baseLine = append(hunkMatch[j].baseLine, m)
+					}
+				}
+			}
+		}
+
+		// Check has conflicts
+		conflicts := []int{}
+		for j, p := range hunkMatch {
+			if len(p.baseLine) != 1 {
+				conflicts = append(conflicts, j)
+			}
+		}
+
+		// Resolve conflicts
+		for len(conflicts) > 0 {
+			var a, b int
+			if conflicts[0] == len(hunkMatch)-1 {
+				a = conflicts[0]
+				b = conflicts[0] - 1
+			} else {
+				a = conflicts[0]
+				i := 1
+				for len(hunkMatch[conflicts[0]+i].baseLine) != 1 {
+					i++
+				}
+				b = conflicts[0] + i
+			}
+
+			if len(hunkMatch[a].baseLine) > 0 {
+				k := 0
+				for k < len(hunkMatch[a].baseLine) && hunkMatch[b].baseLine[0] > hunkMatch[a].baseLine[k] {
+					k++
+				}
+				if conflicts[0] != len(hunkMatch)-1 {
+					k--
+				}
+				hunkMatch[a].baseLine = []int{hunkMatch[a].baseLine[k]}
+			} else {
+				hunkMatch[a].baseLine = []int{-1}
+			}
+
+			conflicts = conflicts[1:]
+		}
+
+		k := hunkMatch[0].baseLine[0]
+		for j := 1; j < numHunkLines; j++ {
+			if hunkMatch[j].baseLine[0] != -1 {
+				k++
+			}
+		}
+
+		hunk := ""
+		contextLine := 0
+		addLine := 0
+		oldLine := 0
+		line := hunkMatch[0].baseLine[0]
+		for j := 0; j < numHunkLines; j++ {
+			c := ' '
+			switch hunkMatch[j].origin {
+			case git.DiffLineContext:
+				c = ' '
+				contextLine++
+			case git.DiffLineAddition:
+				c = '+'
+				addLine++
+			case git.DiffLineDeletion:
+				c = '-'
+				oldLine++
+			}
+
+			if hunkMatch[j].baseLine[0] == -1 {
+				if hunkMatch[j].origin == git.DiffLineAddition {
+					hunk = fmt.Sprintf("%s%c%s", hunk, c, hunkMatch[j].content)
+				} else if hunkMatch[j].origin == git.DiffLineDeletion {
+					oldLine++
+					hunk = fmt.Sprintf("%s>%c%s", hunk, c, hunkMatch[j].content)
+				} else {
+					contextLine--
+					hunk = fmt.Sprintf("%s>%c%s", hunk, c, hunkMatch[j].content)
+				}
+			} else {
+				if hunkMatch[j].baseLine[0]-line > 1 {
+					line++
+					for ; line < hunkMatch[j].baseLine[0]; line++ {
+						hunk = fmt.Sprintf("%s<+%s", hunk, baseLines[line])
+					}
+				}
+				line = hunkMatch[j].baseLine[0]
+				hunk = fmt.Sprintf("%s%c%s", hunk, c, hunkMatch[j].content)
+			}
+		}
+
+		oldLine = contextLine + oldLine
+		newLine := contextLine + addLine
+
+		if hunkMatch[len(hunkMatch)-1].baseLine[0] != k {
+			fmt.Println("-- conflict")
+			fmt.Println(hunk)
+			os.Exit(0)
+			// return "", ErrPatchConflict
+		}
+
+		newDiffHunkHeader := rewriteDiffHunkHeader(diffHunk, hunkMatch[0].baseLine[0]+1, oldLine, newLine)
+		newPatch = fmt.Sprintf("%s%s%s", newPatch, newDiffHunkHeader, hunk)
+
+	}
+
+	fmt.Println(newPatch)
+
+	return newPatch, nil
+}
+
+func rewritePatchHeader(patch *git.Patch) (string, error) {
 	patchString, err := patch.String()
 	if err != nil {
 		return "", err
@@ -18,59 +172,10 @@ func recountPatch(ancestorBuffer []byte, patch *git.Patch) (string, error) {
 	index := strings.Index(patchString, "@")
 	newPatch := patchString[:index]
 
-	numHunks, err := patch.NumHunks()
-	if err != nil {
-		return "", err
-	}
-	for i := 0; i < numHunks; i++ {
-		diffHunk, numLines, err := patch.Hunk(i)
-		if err != nil {
-			return "", err
-		}
-
-		hunk := ""
-		hunkSearch := ""
-		for j := 0; j < numLines; j++ {
-			diffLine, err := patch.HunkLine(i, j)
-			if err != nil {
-				return "", err
-			}
-
-			hunkContent := diffLine.Content
-			switch diffLine.Origin {
-			case git.DiffLineContext:
-				hunk = fmt.Sprintf("%s%c", hunk, ' ')
-			case git.DiffLineAddition:
-				hunk = fmt.Sprintf("%s%c", hunk, '+')
-			case git.DiffLineDeletion:
-				hunk = fmt.Sprintf("%s%c", hunk, '-')
-			}
-			hunk = fmt.Sprintf("%s%s", hunk, hunkContent)
-			if diffLine.Origin == git.DiffLineContext || diffLine.Origin == git.DiffLineDeletion {
-				hunkSearch += hunkContent
-			}
-		}
-
-		index := strings.Index(string(ancestorBuffer), hunkSearch)
-		if index == -1 {
-			return "", errors.New("patch conflict")
-		}
-
-		line := 1
-		for j := 0; j < index; j++ {
-			if ancestorBuffer[j] == '\n' || (ancestorBuffer[j] == '\r' && ancestorBuffer[j+1] == '\n') {
-				line++
-			}
-		}
-
-		newDiffHunkHeader := rewriteDiffHunkHeader(diffHunk, line)
-		newPatch = fmt.Sprintf("%s%s%s", newPatch, newDiffHunkHeader, hunk)
-	}
-
 	return newPatch, nil
 }
 
-func rewriteDiffHunkHeader(hunk git.DiffHunk, line int) string {
+func rewriteDiffHunkHeader(hunk git.DiffHunk, line, oldLine, newLine int) string {
 	// format: @@ -112,12 +112,15 @@ func (hs *HTTPServer) registerRoutes() {
 	header := hunk.Header
 	if header[0] != '@' || header[1] != '@' || header[2] != ' ' {
@@ -82,7 +187,7 @@ func rewriteDiffHunkHeader(hunk git.DiffHunk, line int) string {
 	if err != nil {
 		return ""
 	}
-	oldLine, err := readNumber(header, &i, ' ')
+	_, err = readNumber(header, &i, ' ')
 	if err != nil {
 		return ""
 	}
@@ -90,7 +195,7 @@ func rewriteDiffHunkHeader(hunk git.DiffHunk, line int) string {
 	if err != nil {
 		return ""
 	}
-	newLine, err := readNumber(header, &i, ' ')
+	_, err = readNumber(header, &i, ' ')
 	if err != nil {
 		return ""
 	}

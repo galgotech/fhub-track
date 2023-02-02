@@ -10,8 +10,8 @@ type patchByPath struct {
 	patch  *git.Patch
 }
 
-func searchPatchByPath(repository *git.Repository, path string, start, stop *git.Oid) ([]patchByPath, error) {
-	commit, err := repository.LookupCommit(start)
+func searchPatchByPath(repo *git.Repository, path string, start, stop *git.Oid) ([]patchByPath, error) {
+	commit, err := repo.LookupCommit(start)
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +32,7 @@ func searchPatchByPath(repository *git.Repository, path string, start, stop *git
 			return nil, err
 		}
 
-		diff, err := repository.DiffTreeToTree(parentTree, tree, &git.DiffOptions{
+		diff, err := repo.DiffTreeToTree(parentTree, tree, &git.DiffOptions{
 			Flags:        git.DiffPatience,
 			ContextLines: 5,
 			OldPrefix:    "a",
