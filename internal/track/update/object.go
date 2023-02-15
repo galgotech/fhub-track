@@ -1,7 +1,6 @@
 package update
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -10,103 +9,58 @@ import (
 )
 
 type object struct {
-	commitSrc *git.Oid
-	commitDst *git.Oid
-	pathSrc   string
-	deleted   bool
-	repo      string
+	// repo    string
+	path         string
+	commit       *git.Oid
+	blob         *git.Blob
+	blobAncestor *git.Blob
+	mode         uint16
+	deleted      bool
+	link         *object
 }
 
-type mapObject = map[string]*object
+type mapPathObject = map[string]*object
+type mapCommitPath = map[*git.Oid]mapPathObject
 
-func (t *Update) SearchObjects() (mapObject, error) {
+func (t *Update) MapObjects() (mapPathObject, mapCommitPath, mapCommitPath, error) {
 	head, err := t.dst.Head()
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	commit, err := t.dst.LookupCommit(head.Target())
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	tracked := &mapObject{}
+	objects := &mapPathObject{}
+	commitsSrc := &mapCommitPath{}
+	commitsDst := &mapCommitPath{}
 	stackCommit := []*git.Commit{commit}
 	for len(stackCommit) > 0 {
 		commit := stackCommit[0]
 		parents := utils.CommitParents(commit)
-		err = t.commitIter(tracked, commit, parents)
+		err = t.commitIter(objects, commitsSrc, commitsDst, commit)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 
 		stackCommit = append(stackCommit[1:], parents...)
 	}
 
-	for path, track := range *tracked {
-		if track.repo == "" {
-			delete(*tracked, path)
-		}
-	}
-
-	return *tracked, nil
+	return *objects, *commitsSrc, *commitsDst, nil
 }
 
-func (t *Update) commitIter(tracked *mapObject, commit *git.Commit, parents []*git.Commit) error {
-	commitTree, err := commit.Tree()
-	if err != nil {
-		return err
-	}
-
-	var commitParentTree *git.Tree
-	if len(parents) > 0 {
-		commitParentTree, err = parents[0].Tree()
-		if err != nil {
-			return err
-		}
-	}
-
-	diffTree, err := t.dst.DiffTreeToTree(commitParentTree, commitTree, &git.DiffOptions{
-		Flags: git.DiffNormal,
-	})
-	if err != nil {
-		return err
-	}
-
-	err = diffTree.FindSimilar(&git.DiffFindOptions{
-		Flags: git.DiffFindRenames | git.DiffFindCopies | git.DiffFindForUntracked,
-	})
-	if err != nil {
-		return err
-	}
-
-	nDetals, err := diffTree.NumDeltas()
-	if err != nil {
-		return err
-	}
-
-	for i := 0; i < nDetals; i++ {
-		delta, err := diffTree.GetDelta(i)
-		if err != nil {
-			return err
-		}
-
-		path := delta.NewFile.Path
-		if _, ok := (*tracked)[path]; !ok {
-			(*tracked)[path] = &object{
-				deleted: delta.Status == git.DeltaDeleted,
-			}
-		}
-	}
-
-	lines := strings.Split(strings.TrimSpace(commit.Message()), "\n")
+func (t *Update) commitIter(objects *mapPathObject, commitsSrc, commitsDst *mapCommitPath, commitDst *git.Commit) error {
+	lines := strings.Split(strings.TrimSpace(commitDst.Message()), "\n")
 	if len(lines) < 3 {
 		return nil
 	}
 
 	if lines[0] == "fhub-track" || lines[1] == "" {
-		var repo string
-		var oid *git.Oid
+		// var repo string
+		var commitOidSrc *git.Oid
+		commitOidDst := commitDst.Id().Copy()
 
 		lastKey := ""
 		for _, line := range lines[2:] {
@@ -115,28 +69,49 @@ func (t *Update) commitIter(tracked *mapObject, commit *git.Commit, parents []*g
 			if key, ok := parseMessageKey(line); ok {
 				lastKey = key
 			} else if lastKey == "repo" {
-				repo = line
+				// repo = line
 			} else if lastKey == "hash" {
 				var err error
-				oid, err = git.NewOid(line)
+				commitOidSrc, err = git.NewOid(line)
 				if err != nil {
 					return err
 				}
+
 			} else if lastKey == "files" {
-				objects := strings.Split(line, ":")
-				if len(objects) != 2 {
+				path := strings.Split(line, ":")
+				if len(path) != 2 {
 					return fmt.Errorf("invalid line '%s'", line)
 				}
 
-				if objectTracked, ok := (*tracked)[objects[1]]; ok {
-					if objectTracked.commitSrc == nil {
-						objectTracked.repo = repo
-						objectTracked.commitSrc = oid
-						objectTracked.commitDst = commit.Id()
-						objectTracked.pathSrc = objects[0]
+				if _, ok := (*commitsSrc)[commitOidSrc]; !ok {
+					(*commitsSrc)[commitOidSrc] = map[string]*object{}
+				}
+
+				if _, ok := (*commitsDst)[commitOidDst]; !ok {
+					(*commitsDst)[commitOidDst] = map[string]*object{}
+				}
+
+				// Add only the first time path find
+				if _, ok := (*objects)[path[1]]; !ok {
+					if _, ok := (*commitsSrc)[commitOidSrc][path[1]]; !ok {
+						objSrc := &object{
+							// repo:      repo,
+							commit: commitOidSrc,
+							path:   path[0],
+						}
+						objDst := &object{
+							// repo:      repo,
+							commit: commitOidDst,
+							path:   path[1],
+						}
+
+						objSrc.link = objDst
+						objDst.link = objSrc
+
+						(*objects)[path[1]] = objDst
+						(*commitsSrc)[commitOidSrc][path[1]] = objSrc
+						(*commitsDst)[commitOidDst][path[1]] = objDst
 					}
-				} else {
-					return errors.New("path not found")
 				}
 
 			} else if lastKey == "move" {

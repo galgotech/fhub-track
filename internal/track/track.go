@@ -58,7 +58,7 @@ func Update(setting *setting.Setting) error {
 		return err
 	}
 
-	u := update.New(src, dst)
+	u := update.New(setting, src, dst)
 
 	err = u.Run()
 	if err != nil {
