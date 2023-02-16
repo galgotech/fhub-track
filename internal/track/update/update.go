@@ -53,27 +53,8 @@ func (t *Update) Run() error {
 		return err
 	}
 
-	headCommitSrc, err := t.src.LookupCommit(headSrc.Target())
-	if err != nil {
-		logTrack.Error("head lookup commit", "repo", "src")
-		return err
-	}
-	headCommitDst, err := t.dst.LookupCommit(headDst.Target())
-	if err != nil {
-		logTrack.Error("head lookup commit", "repo", "src")
-		return err
-	}
-
-	headTreeSrc, err := headCommitSrc.Tree()
-	if err != nil {
-		logTrack.Error("head tree", "repo", "src")
-		return err
-	}
-	headTreeDst, err := headCommitDst.Tree()
-	if err != nil {
-		logTrack.Error("head tree", "repo", "dst")
-		return err
-	}
+	headCommitOidSrc := headSrc.Target()
+	headCommitOidDst := headDst.Target()
 
 	logTrack.Info("map objects")
 	mapObjects, mapCommitsSrc, mapCommitsDst, err := t.MapObjects()
@@ -84,21 +65,21 @@ func (t *Update) Run() error {
 	logTrack.Debug("objects", "count", len(mapObjects))
 
 	logTrack.Info("load blob", "repo", "src")
-	err = t.blob(t.src, mapCommitsSrc, headTreeSrc)
+	err = t.blob(t.src, mapCommitsSrc, headCommitOidSrc)
 	if err != nil {
 		return err
 	}
 
 	logTrack.Info("load blob", "repo", "dst")
-	err = t.blob(t.dst, mapCommitsDst, headTreeDst)
+	err = t.blob(t.dst, mapCommitsDst, headCommitOidDst)
 	if err != nil {
 		return err
 	}
 
-	for path, objectDst := range mapObjects {
-		logTrack.Info("update", "path", path)
+	for _, objectDst := range mapObjects {
+		logTrack.Info("update", "path", objectDst.path)
 		objectSrc := objectDst.link
-		err := t.updateObject(path, objectSrc, objectDst)
+		err := t.updateObject(objectSrc, objectDst)
 		if err != nil {
 			return err
 		}
@@ -107,19 +88,36 @@ func (t *Update) Run() error {
 	return nil
 }
 
-func (t *Update) blob(repo *git.Repository, mapObjects mapCommitPath, newTree *git.Tree) error {
+func (t *Update) blob(repo *git.Repository, mapObjects mapCommitPath, headCommitOid *git.Oid) error {
+	headCommit, err := repo.LookupCommit(headCommitOid)
+	if err != nil {
+		logTrack.Error("head lookup commit", "repo", "src")
+		return err
+	}
+	headTree, err := headCommit.Tree()
+	if err != nil {
+		logTrack.Error("head tree", "repo", "src")
+		return err
+	}
+
 	for commitOid, mapPaths := range mapObjects {
-		commit, err := repo.LookupCommit(commitOid)
+		logTrack.Info("blob current commit", "repoPath", repo.Path(), "commit", commitOid, "head", headCommitOid.String())
+
+		oid, err := git.NewOid(commitOid)
 		if err != nil {
 			return err
 		}
 
+		commit, err := repo.LookupCommit(oid)
+		if err != nil {
+			return err
+		}
 		oldTree, err := commit.Tree()
 		if err != nil {
 			return err
 		}
 
-		diff, err := repo.DiffTreeToTree(oldTree, newTree, &git.DiffOptions{
+		diff, err := repo.DiffTreeToTree(oldTree, headTree, &git.DiffOptions{
 			Flags: git.DiffMinimal | git.DiffIncludeTypeChange | git.DiffIncludeTypeChangeTrees,
 			// IgnoreSubmodules SubmoduleIgnore
 			// Pathspec         []string
@@ -138,44 +136,48 @@ func (t *Update) blob(repo *git.Repository, mapObjects mapCommitPath, newTree *g
 		}
 
 		// Rename detection (slow operation with many commits diff)
-		// err = diff.FindSimilar(&git.DiffFindOptions{
-		// 	Flags: git.DiffFindRenames | git.DiffFindCopies | git.DiffFindForUntracked,
-		// })
-		// if err != nil {
-		// 	return err
-		// }
-
+		err = diff.FindSimilar(&git.DiffFindOptions{
+			Flags: git.DiffFindRenames | git.DiffFindCopies | git.DiffFindForUntracked,
+		})
+		if err != nil {
+			return err
+		}
 		diff.ForEach(func(delta git.DiffDelta, progress float64) (git.DiffForEachHunkCallback, error) {
-			var deltaOid *git.Oid
-			var deltaPath string
-			var deltaMode uint16
-			var ancestorDeltaOid *git.Oid
-			deleted := false
-
 			switch true {
 			case delta.Status == git.DeltaModified:
-				deltaOid = delta.NewFile.Oid
-				ancestorDeltaOid = delta.OldFile.Oid
-				deltaPath = delta.NewFile.Path
-				deltaMode = delta.NewFile.Mode
+				if object, ok := mapPaths[delta.OldFile.Path]; ok {
+					object.mode = delta.OldFile.Mode
+					object.blob = delta.OldFile.Oid
+
+					object.head.commit = headCommitOid.String()
+					object.head.path = delta.NewFile.Path
+					object.head.mode = delta.NewFile.Mode
+					object.head.blob = delta.NewFile.Oid
+				}
+
 			case delta.Status == git.DeltaAdded:
-				deltaOid = delta.NewFile.Oid
-				ancestorDeltaOid = delta.NewFile.Oid
-				deltaPath = delta.NewFile.Path
-				deltaMode = delta.NewFile.Mode
+				// Ignore added files
+				break
+
 			case delta.Status == git.DeltaDeleted:
-				deltaOid = delta.OldFile.Oid
-				ancestorDeltaOid = deltaOid
-				deltaPath = delta.OldFile.Path
-				deltaMode = delta.OldFile.Mode
-				deleted = true
+				if object, ok := mapPaths[delta.OldFile.Path]; ok {
+					object.mode = delta.OldFile.Mode
+					object.blob = delta.OldFile.Oid
+
+					object.head = nil
+				}
 
 			case delta.Status == git.DeltaRenamed || delta.Status == git.DeltaCopied:
-				// TODO: review path when renamed or copied
-				deltaOid = delta.NewFile.Oid
-				ancestorDeltaOid = delta.OldFile.Oid
-				deltaPath = delta.NewFile.Path
-				deltaMode = delta.NewFile.Mode
+				if object, ok := mapPaths[delta.OldFile.Path]; ok {
+					object.mode = delta.OldFile.Mode
+					object.blob = delta.OldFile.Oid
+
+					object.head.commit = headCommitOid.String()
+					object.head.path = delta.NewFile.Path
+					object.head.mode = delta.NewFile.Mode
+					object.head.blob = delta.NewFile.Oid
+				}
+
 			// case git.DeltaUnmodified
 			// case git.DeltaIgnored:
 			// case git.DeltaUntracked:
@@ -186,25 +188,20 @@ func (t *Update) blob(repo *git.Repository, mapObjects mapCommitPath, newTree *g
 				return nil, fmt.Errorf("not implemented diff delta status '%s' '%s' '%s'", delta.Status, delta.NewFile.Path, delta.OldFile.Path)
 			}
 
-			if object, ok := mapPaths[deltaPath]; ok {
-				object.blob = deltaOid
-				object.mode = deltaMode
-				object.deleted = deleted
-				object.blobAncestor = ancestorDeltaOid
-			}
-
 			return nil, nil
 		}, git.DiffDetailFiles)
 	}
 	return nil
 }
 
-func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err error) {
-	if objectDst.deleted {
+func (t *Update) updateObject(objectSrc, objectDst *object) (err error) {
+	path := objectDst.path
+	if objectDst.head == nil {
 		logTrack.Info("deleted", "path", path)
 		return nil
 	}
-	if objectDst.link.deleted {
+
+	if objectSrc.head == nil {
 		pathRemove := filepath.Join(t.setting.DstRepo, path)
 		logTrack.Info("deleting object", "path", pathRemove)
 		err := os.Remove(pathRemove)
@@ -213,6 +210,7 @@ func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err er
 		}
 		return nil
 	}
+
 	if objectSrc.blob == nil {
 		logTrack.Info("unmodified", "path", path, "repo", "src")
 		return nil
@@ -222,15 +220,15 @@ func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err er
 		return nil
 	}
 
-	blobAncestor, err := t.src.LookupBlob(objectSrc.blobAncestor)
+	blobAncestor, err := t.src.LookupBlob(objectSrc.blob)
 	if err != nil {
 		return err
 	}
-	oursBlob, err := t.src.LookupBlob(objectSrc.blob)
+	oursBlob, err := t.src.LookupBlob(objectSrc.head.blob)
 	if err != nil {
 		return err
 	}
-	theirsBlob, err := t.dst.LookupBlob(objectDst.blob)
+	theirsBlob, err := t.dst.LookupBlob(objectDst.head.blob)
 	if err != nil {
 		return err
 	}
@@ -238,23 +236,23 @@ func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err er
 	ancestorFile := git.MergeFileInput{
 		Path:     path,
 		Mode:     0,
-		Contents: []byte(blobAncestor.Contents()),
+		Contents: blobAncestor.Contents(),
 	}
 	oursFile := git.MergeFileInput{
 		Path:     path,
 		Mode:     0,
-		Contents: []byte(oursBlob.Contents()),
+		Contents: oursBlob.Contents(),
 	}
 	theirsFile := git.MergeFileInput{
 		Path:     path,
 		Mode:     0,
-		Contents: []byte(theirsBlob.Contents()),
+		Contents: theirsBlob.Contents(),
 	}
 
 	mergeResult, err := git.MergeFile(ancestorFile, oursFile, theirsFile, &git.MergeFileOptions{
-		AncestorLabel: fmt.Sprintf("ancestor %s", objectDst.commit.String()),
-		OurLabel:      fmt.Sprintf("src %s", objectSrc.commit.String()),
-		TheirLabel:    fmt.Sprintf("dst %s", objectDst.commit.String()),
+		AncestorLabel: fmt.Sprintf("ancestor %s", objectDst.commit),
+		OurLabel:      fmt.Sprintf("src %s", objectSrc.commit),
+		TheirLabel:    fmt.Sprintf("dst %s", objectDst.commit),
 		Favor:         git.MergeFileFavorNormal,
 		Flags:         git.MergeFileDiffPatience,
 		//  MarkerSize    uint16
@@ -263,7 +261,15 @@ func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err er
 		return err
 	}
 
-	err = ioutil.WriteFile(filepath.Join(t.setting.DstRepo, path), mergeResult.Contents, fs.FileMode(objectDst.mode))
+	// var pathSave string
+	// if objectSrc.path != objectSrc.head.path {
+	// 	// contents = fmt.Sprintf("%b->%b%b", objectDst.path, objectDst.link, contents)
+	// } else {
+	// 	pathSave = filepath.Join(t.setting.DstRepo, path)
+	// }
+
+	path = filepath.Join(t.setting.DstRepo, path)
+	err = ioutil.WriteFile(path, mergeResult.Contents, fs.FileMode(objectDst.mode))
 	if err != nil {
 		return err
 	}

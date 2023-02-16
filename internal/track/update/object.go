@@ -8,21 +8,31 @@ import (
 	git "github.com/libgit2/git2go/v34"
 )
 
-type object struct {
+type baseObject struct {
 	// repo    string
-	path         string
-	commit       *git.Oid
-	blob         *git.Oid
-	blobAncestor *git.Oid
-	mode         uint16
-	deleted      bool
-	link         *object
+	path   string
+	commit string
+
+	mode uint16
+	blob *git.Oid
 }
 
-type mapPathObject = map[string]*object
-type mapCommitPath = map[*git.Oid]mapPathObject
+type head struct {
+	baseObject
+}
 
-func (t *Update) MapObjects() (mapPathObject, mapCommitPath, mapCommitPath, error) {
+type object struct {
+	baseObject
+
+	link *object
+	head *head
+}
+
+type listPathObject = []*object
+type mapPathObject = map[string]*object
+type mapCommitPath = map[string]mapPathObject
+
+func (t *Update) MapObjects() (listPathObject, mapCommitPath, mapCommitPath, error) {
 	head, err := t.dst.Head()
 	if err != nil {
 		return nil, nil, nil, err
@@ -48,7 +58,12 @@ func (t *Update) MapObjects() (mapPathObject, mapCommitPath, mapCommitPath, erro
 		stackCommit = append(stackCommit[1:], parents...)
 	}
 
-	return *objects, *commitsSrc, *commitsDst, nil
+	listObject := []*object{}
+	for _, object := range *objects {
+		listObject = append(listObject, object)
+	}
+
+	return listObject, *commitsSrc, *commitsDst, nil
 }
 
 func (t *Update) commitIter(objects *mapPathObject, commitsSrc, commitsDst *mapCommitPath, commitDst *git.Commit) error {
@@ -59,8 +74,8 @@ func (t *Update) commitIter(objects *mapPathObject, commitsSrc, commitsDst *mapC
 
 	if lines[0] == "fhub-track" || lines[1] == "" {
 		// var repo string
-		var commitOidSrc *git.Oid
-		commitOidDst := commitDst.Id().Copy()
+		var commitOidSrc string
+		commitOidDst := commitDst.Id().String()
 
 		lastKey := ""
 		for _, line := range lines[2:] {
@@ -72,7 +87,7 @@ func (t *Update) commitIter(objects *mapPathObject, commitsSrc, commitsDst *mapC
 				// repo = line
 			} else if lastKey == "hash" {
 				var err error
-				commitOidSrc, err = git.NewOid(line)
+				commitOidSrc = line
 				if err != nil {
 					return err
 				}
@@ -95,14 +110,21 @@ func (t *Update) commitIter(objects *mapPathObject, commitsSrc, commitsDst *mapC
 				if _, ok := (*objects)[path[1]]; !ok {
 					if _, ok := (*commitsSrc)[commitOidSrc][path[1]]; !ok {
 						objSrc := &object{
-							// repo:      repo,
-							commit: commitOidSrc,
-							path:   path[0],
+							baseObject: baseObject{
+								commit: commitOidSrc,
+								path:   path[0],
+								// repo:      repo,
+							},
+							head: &head{},
 						}
+
 						objDst := &object{
-							// repo:      repo,
-							commit: commitOidDst,
-							path:   path[1],
+							baseObject: baseObject{
+								commit: commitOidDst,
+								path:   path[1],
+								// repo:      repo,
+							},
+							head: &head{},
 						}
 
 						objSrc.link = objDst
