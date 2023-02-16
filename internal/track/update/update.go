@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	"github.com/galgotech/fhub-track/internal/log"
@@ -186,19 +187,10 @@ func (t *Update) blob(repo *git.Repository, mapObjects mapCommitPath, newTree *g
 			}
 
 			if object, ok := mapPaths[deltaPath]; ok {
-				blob, err := repo.LookupBlob(deltaOid)
-				if err != nil {
-					return nil, err
-				}
-				blobAncestor, err := repo.LookupBlob(ancestorDeltaOid)
-				if err != nil {
-					return nil, err
-				}
-
-				object.blob = blob
+				object.blob = deltaOid
 				object.mode = deltaMode
 				object.deleted = deleted
-				object.blobAncestor = blobAncestor
+				object.blobAncestor = ancestorDeltaOid
 			}
 
 			return nil, nil
@@ -212,6 +204,15 @@ func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err er
 		logTrack.Info("deleted", "path", path)
 		return nil
 	}
+	if objectDst.link.deleted {
+		pathRemove := filepath.Join(t.setting.DstRepo, path)
+		logTrack.Info("deleting object", "path", pathRemove)
+		err := os.Remove(pathRemove)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 	if objectSrc.blob == nil {
 		logTrack.Info("unmodified", "path", path, "repo", "src")
 		return nil
@@ -221,20 +222,33 @@ func (t *Update) updateObject(path string, objectSrc, objectDst *object) (err er
 		return nil
 	}
 
+	blobAncestor, err := t.src.LookupBlob(objectSrc.blobAncestor)
+	if err != nil {
+		return err
+	}
+	oursBlob, err := t.src.LookupBlob(objectSrc.blob)
+	if err != nil {
+		return err
+	}
+	theirsBlob, err := t.dst.LookupBlob(objectDst.blob)
+	if err != nil {
+		return err
+	}
+
 	ancestorFile := git.MergeFileInput{
 		Path:     path,
 		Mode:     0,
-		Contents: []byte(objectSrc.blobAncestor.Contents()),
+		Contents: []byte(blobAncestor.Contents()),
 	}
 	oursFile := git.MergeFileInput{
 		Path:     path,
 		Mode:     0,
-		Contents: []byte(objectSrc.blob.Contents()),
+		Contents: []byte(oursBlob.Contents()),
 	}
 	theirsFile := git.MergeFileInput{
 		Path:     path,
 		Mode:     0,
-		Contents: []byte(objectDst.blob.Contents()),
+		Contents: []byte(theirsBlob.Contents()),
 	}
 
 	mergeResult, err := git.MergeFile(ancestorFile, oursFile, theirsFile, &git.MergeFileOptions{

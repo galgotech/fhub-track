@@ -12,8 +12,8 @@ type object struct {
 	// repo    string
 	path         string
 	commit       *git.Oid
-	blob         *git.Blob
-	blobAncestor *git.Blob
+	blob         *git.Oid
+	blobAncestor *git.Oid
 	mode         uint16
 	deleted      bool
 	link         *object
